@@ -34,6 +34,12 @@ def main():
     profile = get_car_profile_from_vin(vin)
     print(profile)
 
+    # === ADD THIS TO TEST VALIDATION ===
+    from schemas import CarProfile
+    print("\n=== Validating with Pydantic... ===")
+    validated = CarProfile(**profile)
+    print("SUCCESS! The data matches the schema.")
+
 
 if __name__ == "__main__":
     main()

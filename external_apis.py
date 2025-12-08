@@ -236,6 +236,85 @@ def get_economy_from_carquery(year: int, make: str, model: str) -> Dict[str, Any
 
     return economy
 
+# -------------------------------------------------------------------
+# 7) NHTSA 5-Star Safety Ratings (The Enrichment)
+# -------------------------------------------------------------------
+def get_safety_rating(year: int, make: str, model: str) -> Optional[int]:
+    """
+    Query NHTSA 5-Star Safety Ratings.
+    Step 1: Get VehicleId for Year/Make/Model
+    Step 2: Get OverallRating for VehicleId
+    """
+    # 1. Check Cache
+    cache_key = f"nhtsa_safety:{year}:{make}:{model}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Basic cleaning
+    if not year or not make or not model:
+        return None
+
+    try:
+        # Step 1: Find the specific Vehicle ID
+        # Endpoint: /SafetyRatings/modelyear/{year}/make/{make}/model/{model}
+        base_url = "https://api.nhtsa.gov/SafetyRatings"
+        query_url = f"{base_url}/modelyear/{year}/make/{make}/model/{model}"
+
+        #Debug:
+
+        print(f"DEBUG NHTSA QUERY: {query_url}")
+        
+        resp = requests.get(query_url, timeout=5)
+        if resp.status_code != 200:
+            cache_set(cache_key, None)
+            return None
+            
+        data = resp.json()
+        results = data.get("Results", [])
+        if not results:
+            cache_set(cache_key, None)
+            return None
+            
+        # Just pick the first variant found
+        vehicle_id = results[0].get("VehicleId")
+        if not vehicle_id:
+            cache_set(cache_key, None)
+            return None
+
+        # Step 2: Get Rating for that Vehicle ID
+        rating_url = f"{base_url}/VehicleId/{vehicle_id}"
+        resp_rating = requests.get(rating_url, timeout=5)
+        rating_data = resp_rating.json()
+        rating_results = rating_data.get("Results", [])
+        
+        if not rating_results:
+            cache_set(cache_key, None)
+            return None
+            
+        overall_str = rating_results[0].get("OverallRating", "")
+        
+        # Convert "5" string to 5 int
+        try:
+            rating = int(overall_str)
+        except ValueError:
+            rating = None
+            
+        cache_set(cache_key, rating)
+        return rating
+
+    except Exception as e:
+        print(f"NHTSA Safety API Error: {e}")
+        return None
+
+
+def _parse_int(value: Any) -> Optional[int]:
+    if not value: # Handles None and ""
+        return None
+    try:
+        return int(float(value)) # Handle "4.0" strings safely
+    except (ValueError, TypeError):
+        return None
 
 # -------------------------------------------------------------------
 # 5) High-level profile helper
@@ -275,6 +354,9 @@ def get_car_profile_from_vin(vin: str) -> Dict[str, Any]:
     # 4) Ask CarQuery for fuel economy data (city/highway/mixed MPG + fuel type).
     economy = get_economy_from_carquery(year=year, make=make, model=model)
 
+    # Fetch Safety Rating
+    safety_stars = get_safety_rating(year, make, model)
+
     # 5) Build a clean, compact profile that your app / LLM can rely on.
     profile: Dict[str, Any] = {
         "vin": vin,
@@ -287,9 +369,9 @@ def get_car_profile_from_vin(vin: str) -> Dict[str, Any]:
 
         # Engine summary from NHTSA + fuel type from CarQuery when available.
         "engine": {
-            "displacement_l": nhtsa_data.get("DisplacementL"),
-            "cylinders": nhtsa_data.get("EngineCylinders"),
-            "hp": nhtsa_data.get("EngineHP"),
+            "displacement_l": _parse_float(nhtsa_data.get("DisplacementL")), # Use existing float helper
+            "cylinders": _parse_int(nhtsa_data.get("EngineCylinders")),      # Use new int helper
+            "hp": _parse_int(nhtsa_data.get("EngineHP")),                    # Use new int helper
             "fuel_type": economy.get("fuel_type") or nhtsa_data.get("FuelTypePrimary"),
         },
 
@@ -300,6 +382,11 @@ def get_car_profile_from_vin(vin: str) -> Dict[str, Any]:
             "mixed_mpg": economy.get("mixed_mpg"),
             "source": economy.get("source"),
         },
+
+        "safety": {
+            "nhtsa_stars": safety_stars,
+            "source": "nhtsa" if safety_stars else None
+        }
 
         # If you want raw payloads for debugging, you can uncomment these,
         # but they may be large and include personal data from Auto.dev:

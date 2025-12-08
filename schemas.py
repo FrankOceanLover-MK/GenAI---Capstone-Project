@@ -18,6 +18,11 @@ class EconomySummary(BaseModel):
     source: Optional[str] = None
 
 
+class SafetySummary(BaseModel):
+    nhtsa_stars: Optional[int] = None
+    source: Optional[str] = None
+
+
 class CarProfile(BaseModel):
     vin: str
     year: Optional[int]
@@ -28,6 +33,7 @@ class CarProfile(BaseModel):
     origin: Optional[str]
     engine: EngineSummary
     economy: EconomySummary
+    safety: SafetySummary
 
 class ScoreBreakdownModel(BaseModel):
     price: float
