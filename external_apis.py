@@ -308,3 +308,116 @@ def get_car_profile_from_vin(vin: str) -> Dict[str, Any]:
     }
 
     return profile
+
+
+# [ADD TO external_apis.py]
+
+# -------------------------------------------------------------------
+# 6) Auto.dev Listings Search (The New Fetcher)
+# -------------------------------------------------------------------
+
+def _map_auto_dev_listing_to_schema(item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Adapter: Maps raw Auto.dev listing JSON to our SearchListing schema.
+    """
+    # 1. Extract core vehicle data
+    vehicle = item.get("vehicle", {}) or {}
+    
+    # 2. Extract pricing/mileage from the 'retailListing' block (FIXED)
+    retail = item.get("retailListing", {}) or {}
+    
+    price = retail.get("price")
+    mileage = retail.get("miles")
+    
+    # 3. Handle Distance
+    # If the API doesn't calculate it relative to us, we default to None.
+    distance = item.get("distance") 
+    
+    # 4. Flatten into our schema structure
+    return {
+        "id": item.get("id") or str(item.get("vin")),
+        "year": vehicle.get("year"),
+        "make": vehicle.get("make"),
+        "model": vehicle.get("model"),
+        "trim": item.get("trim") or vehicle.get("trim"),
+        "price": price,              # <--- Now correctly pulled from retail
+        "mileage": mileage,          # <--- Now correctly pulled from retail
+        "distance_miles": distance,
+        "fuel_type": vehicle.get("fuel"),
+        "body_style": vehicle.get("bodyStyle"),
+        # MPG is missing from this API response, so these will likely remain None
+        "city_mpg": vehicle.get("cityMpg"), 
+        "highway_mpg": vehicle.get("highwayMpg"),
+        "safety_rating": None, 
+        "source": "auto.dev"
+    }
+
+def fetch_active_listings(
+    budget: Optional[float] = None,
+    min_year: Optional[int] = None,
+    make: Optional[str] = None,
+    body_style: Optional[str] = None,
+    limit: int = 15
+) -> List[Dict[str, Any]]:
+    """
+    Call Auto.dev GET /listings to find real cars.
+    """
+    if not AUTO_DEV_API_KEY:
+        print("Warning: AUTO_DEV_API_KEY not set. Returning empty results.")
+        return []
+
+    url = "https://api.auto.dev/listings"
+    
+    # Updated Params based on Auto.dev Docs
+    params = {
+        "apikey": AUTO_DEV_API_KEY, 
+        "limit": limit,
+    }
+    
+    # Use dot-notation keys as per Auto.dev documentation
+    if budget:
+        # Auto.dev often uses ranges for price, e.g., "1-30000"
+        params["retailListing.price"] = f"1-{int(budget)}"
+    if min_year:
+        params["vehicle.year"] = f"{min_year}-2025"
+    if make:
+        params["vehicle.make"] = make
+    if body_style:
+        params["vehicle.bodyStyle"] = body_style
+
+    headers = {
+        "Authorization": f"Bearer {AUTO_DEV_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        
+        if resp.status_code != 200:
+            print(f"Auto.dev listings error: {resp.status_code} - {resp.text}")
+            return []
+            
+        data = resp.json()
+        
+        # FIX: The key is 'data', not 'records'
+        raw_listings = data.get("data", [])
+        
+        clean_listings = []
+        for raw in raw_listings:
+
+            ##print("DEBUG RAW ITEM:", raw)
+            
+            try:
+                clean = _map_auto_dev_listing_to_schema(raw)
+                # Ensure we have the basics
+                if clean["year"] and clean["make"] and clean["model"]:
+                    clean_listings.append(clean)
+            except Exception as e:
+                print(f"Skipping malformed listing: {e}")
+                continue
+                
+        return clean_listings
+
+    except Exception as e:
+        print(f"Failed to fetch listings: {e}")
+        return []

@@ -4,7 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from sample_listings import SAMPLE_LISTINGS
+# CHANGE: Import the new fetcher instead of SAMPLE_LISTINGS
+from external_apis import fetch_active_listings
 
 
 @dataclass
@@ -46,7 +47,7 @@ class ListingWithScore:
 
 
 # ----------------------------------------------------------------------------
-# Scoring helpers
+# Scoring helpers (Restored)
 # ----------------------------------------------------------------------------
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -121,29 +122,27 @@ def score_listing(listing: Dict[str, Any], criteria: SearchCriteria) -> ListingW
 # ----------------------------------------------------------------------------
 
 def filter_listings(criteria: SearchCriteria) -> List[Dict[str, Any]]:
-    """Apply deterministic filters before scoring."""
-    filtered: List[Dict[str, Any]] = []
-    for item in SAMPLE_LISTINGS:
-        if criteria.body_style and item.get("body_style"):
-            if item["body_style"].lower() != criteria.body_style.lower():
-                continue
-        if criteria.fuel_type and item.get("fuel_type"):
-            if item["fuel_type"].lower() != criteria.fuel_type.lower():
-                continue
-        if criteria.budget is not None and item.get("price"):
-            # allow a small overage to keep options available
-            if item["price"] > criteria.budget * 1.25:
-                continue
-        if criteria.max_distance is not None and item.get("distance_miles"):
-            if item["distance_miles"] > criteria.max_distance * 1.5:
-                continue
-        filtered.append(item)
-    return filtered
+    """
+    Deprecated: We now rely on the API to filter, but we keep this
+    if we need to do any secondary post-filtering locally.
+    """
+    # This is handled mostly by the API now, but we can leave it empty or 
+    # reuse it for logic the API doesn't support.
+    return [] 
 
 
 def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
     """Filter, score, and rank listings."""
-    candidates = filter_listings(criteria)
+    
+    # 1. Fetch REAL listings from Auto.dev
+    candidates = fetch_active_listings(
+        budget=criteria.budget,
+        min_year=2015, # Optional default to keep results relevant
+        body_style=criteria.body_style,
+        limit=20
+    )
+
+    # 2. Score and rank them
     scored = [score_listing(item, criteria) for item in candidates]
     scored.sort(key=lambda s: s.total_score, reverse=True)
     return scored[:top_k]
