@@ -10,8 +10,11 @@ Right now, it:
 - Uses **CarQuery** to get trims and fuel economy data and converts it to **MPG**.
 - Combines everything into a normalized **car profile**.
 - Exposes this via a small **FastAPI** service.
+- Adds a **deterministic /search endpoint** with a weighted score breakdown so the LLM/UI can explain "why this match" without inventing numbers.
 
-This backend will later be used by our LLM and frontend to answer questions about specific cars.
+
+This backend can be used by the LLM and frontend to answer questions about specific cars and to serve ranked demo listings grounded in structured fields.
+
 
 ---
 
@@ -129,6 +132,13 @@ Then you can hit these URLs in a browser:
 
 Health check:
 http://127.0.0.1:8000/health
+
+Search demo inventory with transparent scoring:
+```bash
+curl -X POST http://127.0.0.1:8000/search \
+  -H "Content-Type: application/json" \
+  -d '{"budget": 26000, "max_distance": 60, "body_style": "SUV"}'
+```
 
 Full car profile for a VIN:
 http://127.0.0.1:8000/cars/WP0AF2A99KS165242

@@ -4,9 +4,18 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from external_apis import get_car_profile_from_vin, ApiError as ExternalApiError  # type: ignore
-from schemas import CarProfile
+from schemas import (
+    CarProfile,
+    SearchResponse,
+    SearchCriteriaModel,
+    SearchResult,
+    ScoreBreakdownModel,
+    SearchListing,
+)
 from llm_client import chat_completion, LLMError
 from llm_prompts import build_car_advice_messages
+from search import search as search_pipeline, SearchCriteria
+
 
 app = FastAPI(title="GenAI Car Assistant Backend")
 
@@ -16,7 +25,7 @@ def health() -> Dict[str, str]:
     """
     Simple health check used by the Streamlit frontend.
     """
-    return {"status": "ok"}
+    return {"status": "ok", "mode": "demo"}
 
 
 def summarize_profile_for_llm(profile: Dict[str, Any]) -> str:
@@ -185,3 +194,39 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
     return ChatResponse(vin=vin, summary=summary, answer=answer)
+
+@app.post("/search", response_model=SearchResponse)
+def search_inventory(payload: SearchCriteriaModel) -> SearchResponse:
+    """
+    Deterministic search over demo inventory.
+
+    Returns scored listings with transparent breakdowns so the LLM/UI can explain
+    "why this match" without inventing numbers.
+    """
+    criteria = SearchCriteria(
+        budget=payload.budget,
+        max_distance=payload.max_distance,
+        body_style=payload.body_style,
+        fuel_type=payload.fuel_type,
+    )
+    results = search_pipeline(criteria)
+    serialized_results: List[SearchResult] = []
+    for r in results:
+        listing_model = SearchListing(**r.listing)
+        score_model = ScoreBreakdownModel(
+            price=r.breakdown.price,
+            mileage=r.breakdown.mileage,
+            distance=r.breakdown.distance,
+            economy=r.breakdown.economy,
+            safety=r.breakdown.safety,
+            total=r.total_score,
+        )
+        serialized_results.append(SearchResult(listing=listing_model, score=score_model))
+
+    criteria_applied = {
+        "budget": payload.budget,
+        "max_distance": payload.max_distance,
+        "body_style": payload.body_style,
+        "fuel_type": payload.fuel_type,
+    }
+    return SearchResponse(results=serialized_results, criteria_applied=criteria_applied)
