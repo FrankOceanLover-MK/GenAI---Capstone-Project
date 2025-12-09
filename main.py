@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import json
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from external_apis import get_car_profile_from_vin, ApiError as ExternalApiError, fetch_active_listings
 from schemas import (
@@ -178,6 +178,7 @@ class ChatRequest(BaseModel):
     """
     question: str
     vin: Optional[str] = None
+    history: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -295,6 +296,22 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=400, detail="question must not be empty")
 
     vin = (payload.vin or "").strip()
+    history = [
+        {"role": h.get("role"), "content": h.get("content", "").strip()}
+        for h in (payload.history or [])
+        if h.get("role") in {"user", "assistant"} and isinstance(h.get("content"), str)
+    ][-10:]
+
+    def history_text(entries: List[Dict[str, str]]) -> str:
+        if not entries:
+            return ""
+        lines = []
+        for item in entries:
+            prefix = "User" if item["role"] == "user" else "Assistant"
+            lines.append(f"{prefix}: {item['content']}")
+        return "\n".join(lines)
+
+    conversation_snippet = history_text(history)
 
     # VIN specific mode
     if vin:
@@ -309,7 +326,12 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
             raise HTTPException(status_code=404, detail="Could not decode VIN")
 
         summary = summarize_profile_for_llm(profile_dict)
-        messages = build_car_advice_messages(user_question=question, car_summary=summary)
+        rich_question = (
+            question
+            if not conversation_snippet
+            else f"Conversation so far:\n{conversation_snippet}\n\nLatest customer question: {question}"
+        )
+        messages = build_car_advice_messages(user_question=rich_question, car_summary=summary)
 
         try:
             answer = chat_completion(messages)
@@ -329,7 +351,13 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
         )
 
     # General discovery mode - SIMPLIFIED
-    filters = extract_filters_from_question(question)
+    rich_query = (
+        question
+        if not conversation_snippet
+        else f"Conversation so far:\n{conversation_snippet}\n\nLatest request: {question}"
+    )
+
+    filters = extract_filters_from_question(rich_query)
     criteria = build_criteria_from_filters(filters)
 
     # Run search
@@ -357,7 +385,7 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
 
     # Use the existing build_recommendation_messages function
     messages = build_recommendation_messages(
-        user_query=question,
+        user_query=rich_query,
         filters=filters,
         listings=listing_dicts,
     )
