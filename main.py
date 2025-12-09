@@ -1,10 +1,13 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from typing import Dict, Any, List, Optional, Tuple
 import json
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from external_apis import get_car_profile_from_vin, ApiError as ExternalApiError  # type: ignore
+from external_apis import get_car_profile_from_vin, ApiError as ExternalApiError, fetch_active_listings
 from schemas import (
     CarProfile,
     SearchResponse,
@@ -13,14 +16,20 @@ from schemas import (
     ScoreBreakdownModel,
     SearchListing,
 )
-from llm_client import chat_completion, LLMError
+from llm_client import chat_completion, LLMError  # Or from ollama_client if that's what you're using
 from llm_prompts import (
     build_car_advice_messages,
     build_filter_extraction_messages,
     build_recommendation_messages,
+    SYSTEM_PROMPT  # ADD THIS IMPORT
 )
 from search import search as search_pipeline, SearchCriteria
 
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="GenAI Car Assistant Backend")
 
@@ -121,7 +130,7 @@ def get_car(vin: str) -> CarProfile:
     """
     try:
         profile_dict = get_car_profile_from_vin(vin)
-    except ExternalApiError as e:  # type: ignore[misc]
+    except ExternalApiError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -144,7 +153,7 @@ def get_car_summary(vin: str) -> CarSummaryResponse:
     """
     try:
         profile_dict = get_car_profile_from_vin(vin)
-    except ExternalApiError as e:  # type: ignore[misc]
+    except ExternalApiError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -169,6 +178,7 @@ class ChatRequest(BaseModel):
     """
     question: str
     vin: Optional[str] = None
+    history: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -273,32 +283,41 @@ def build_criteria_from_filters(filters: Dict[str, Any]) -> SearchCriteria:
 
 
 # -------------------------------------------------------------------
-# Chat endpoint
+# Chat endpoint - SIMPLIFIED VERSION
 # -------------------------------------------------------------------
 
 @app.post("/chat", response_model=ChatResponse)
 def chat_with_llm(payload: ChatRequest) -> ChatResponse:
     """
-    LLM powered explanation endpoint.
-
-    VIN mode
-      Use the VIN to decode a profile and explain that specific car.
-
-    General mode
-      Use the question to infer filters, search live listings, and then explain
-      the best matches.
+    LLM powered explanation endpoint - SIMPLIFIED.
     """
     question = payload.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="question must not be empty")
 
     vin = (payload.vin or "").strip()
+    history = [
+        {"role": h.get("role"), "content": h.get("content", "").strip()}
+        for h in (payload.history or [])
+        if h.get("role") in {"user", "assistant"} and isinstance(h.get("content"), str)
+    ][-10:]
+
+    def history_text(entries: List[Dict[str, str]]) -> str:
+        if not entries:
+            return ""
+        lines = []
+        for item in entries:
+            prefix = "User" if item["role"] == "user" else "Assistant"
+            lines.append(f"{prefix}: {item['content']}")
+        return "\n".join(lines)
+
+    conversation_snippet = history_text(history)
 
     # VIN specific mode
     if vin:
         try:
             profile_dict = get_car_profile_from_vin(vin)
-        except ExternalApiError as e:  # type: ignore[misc]
+        except ExternalApiError as e:
             raise HTTPException(status_code=502, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -307,7 +326,12 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
             raise HTTPException(status_code=404, detail="Could not decode VIN")
 
         summary = summarize_profile_for_llm(profile_dict)
-        messages = build_car_advice_messages(user_question=question, car_summary=summary)
+        rich_question = (
+            question
+            if not conversation_snippet
+            else f"Conversation so far:\n{conversation_snippet}\n\nLatest customer question: {question}"
+        )
+        messages = build_car_advice_messages(user_question=rich_question, car_summary=summary)
 
         try:
             answer = chat_completion(messages)
@@ -326,26 +350,42 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
             listings=[],
         )
 
-    # General discovery mode
-    filters = extract_filters_from_question(question)
+    # General discovery mode - SIMPLIFIED
+    rich_query = (
+        question
+        if not conversation_snippet
+        else f"Conversation so far:\n{conversation_snippet}\n\nLatest request: {question}"
+    )
+
+    filters = extract_filters_from_question(rich_query)
     criteria = build_criteria_from_filters(filters)
 
     # Run search
     try:
         results = search_pipeline(criteria, top_k=5)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+        logger.error(f"Search failed: {e}", exc_info=True)
+        # Return a friendly response instead of crashing
+        return ChatResponse(
+            mode="general",
+            question=question,
+            vin=None,
+            summary=None,
+            answer=f"I'm having trouble searching for vehicles right now. The search service returned an error: {str(e)[:100]}",
+            filters=filters,
+            listings=[],
+        )
 
     listing_models: List[SearchListing] = []
     listing_dicts: List[Dict[str, Any]] = []
     for r in results:
-        # r.listing is already a dict from the search pipeline
         model = SearchListing(**r.listing)
         listing_models.append(model)
         listing_dicts.append(model.dict())
 
+    # Use the existing build_recommendation_messages function
     messages = build_recommendation_messages(
-        user_query=question,
+        user_query=rich_query,
         filters=filters,
         listings=listing_dicts,
     )
@@ -379,13 +419,27 @@ def search_inventory(payload: SearchCriteriaModel) -> SearchResponse:
 
     Returns scored listings with transparent breakdowns.
     """
+    logger.debug(f"Search criteria received: {payload.dict()}")
+    
     criteria = SearchCriteria(
         budget=payload.budget,
         max_distance=payload.max_distance,
         body_style=payload.body_style,
         fuel_type=payload.fuel_type,
     )
-    results = search_pipeline(criteria)
+    
+    try:
+        results = search_pipeline(criteria)
+        logger.debug(f"Search returned {len(results)} results")
+        
+        if results:
+            for i, r in enumerate(results[:3]):
+                logger.debug(f"Result {i}: {r.listing.get('make')} {r.listing.get('model')} - Score: {r.total_score:.2f}")
+        
+    except Exception as e:
+        logger.error(f"Search failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+    
     serialized_results: List[SearchResult] = []
     for r in results:
         listing_model = SearchListing(**r.listing)

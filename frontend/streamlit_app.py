@@ -1,258 +1,340 @@
 import streamlit as st
-
-from components.vin_input import render as render_vin
-from components.filters import render as render_filters
-from components.charts import table as render_table, mpg_chart
 from components.utils import (
-    try_recommendations,
-    openapi_has_recommendations,
-    ApiError,
-    DEFAULT_BASE,
     health,
     ask_chat,
+    ApiError,
+    DEFAULT_BASE,
 )
 
-st.set_page_config(page_title="Carwise AI", layout="wide")
+st.set_page_config(
+    page_title="Carwise AI - Your Smart Car Shopping Assistant",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-
-def render_general_chat():
-    st.markdown('<div class="glass-header">Ask Carwise AI</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="glass-subtitle">'
-        "Describe the kind of car you want. The assistant will search live listings and explain the best options."
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    # keep chat history in session
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = []
-
-    # show previous messages
-    for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-
-    # new user message
-    user_text = st.chat_input("Describe what you are looking for")
-    if not user_text:
-        return
-
-    user_text = user_text.strip()
-    if not user_text:
-        return
-
-    # add and display user bubble
-    st.session_state.chat_messages.append(
-        {"role": "user", "content": user_text}
-    )
-    with st.chat_message("user"):
-        st.write(user_text)
-
-    # call backend chat, which already uses LLM plus search
-    answer_text = "Something went wrong."
-    with st.chat_message("assistant"):
-        with st.spinner("Asking Carwise AI and searching live listings"):
-            try:
-                reply = ask_chat(user_text, vin=None)
-
-                answer_text = reply.get("answer") or "No answer returned."
-                st.write(answer_text)
-
-                filters = reply.get("filters") or {}
-                if filters:
-                    st.markdown("**Filters the AI inferred**")
-                    cols = st.columns(len(filters))
-                    for i, (key, val) in enumerate(filters.items()):
-                        with cols[i]:
-                            st.caption(key)
-                            st.code(str(val))
-
-                listings = reply.get("listings") or []
-                if listings:
-                    st.markdown("**Top matches**")
-                    render_table(listings)
-
-            except ApiError as e:
-                answer_text = f"Sorry, the backend returned an error: {e.message}"
-                st.error(e.message)
-            except Exception:
-                answer_text = "Chat request failed. Check that your LLM server is running."
-                st.error(answer_text)
-
-    # persist assistant reply so it shows up on next rerun
-    st.session_state.chat_messages.append(
-        {"role": "assistant", "content": answer_text}
-    )
-
-
-# global styling
+# Enhanced global styling with better hierarchy and consistency
 st.markdown(
     """
     <style>
+    /* Base styles */
     .stApp {
-        background: radial-gradient(circle at top left, #4e54c8 0, #1f1c2c 35, #141321 100);
-        color: #f5f5ff;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: #ffffff;
     }
 
     .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1200px;
+        padding-top: 3rem;
+        padding-bottom: 3rem;
+        max-width: 900px;
     }
 
+    /* Glass card effect - consistent across all cards */
     .glass-card {
-        background: rgba(10, 12, 28, 0.85);
-        border-radius: 18px;
-        padding: 20px 22px 18px 22px;
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.55);
-        backdrop-filter: blur(14px);
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 20px;
+        padding: 2rem;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        margin-bottom: 1.5rem;
     }
 
-    .glass-header {
-        font-size: 1.4rem;
-        font-weight: 600;
-        margin-bottom: 0.25rem;
+    /* Header styles */
+    .main-header {
+        font-size: 2.8rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+        text-align: center;
+        background: linear-gradient(to right, #fff, #e0e7ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
     }
 
-    .glass-subtitle {
-        font-size: 0.9rem;
-        opacity: 0.8;
-        margin-bottom: 1rem;
+    .sub-header {
+        font-size: 1.1rem;
+        opacity: 0.9;
+        text-align: center;
+        margin-bottom: 2rem;
     }
 
-    .stButton>button {
-        border-radius: 999px;
-        font-weight: 600;
+    /* Chat message styling */
+    .stChatMessage {
+        background: rgba(255, 255, 255, 0.15) !important;
+        border-radius: 15px !important;
+        padding: 1rem !important;
+        margin-bottom: 1rem !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
     }
 
-    .stTextInput>div>div>input {
-        border-radius: 999px;
+    /* Input styling */
+    .stTextInput > div > div > input,
+    .stChatInput > div > textarea {
+        background: rgba(255, 255, 255, 0.2) !important;
+        border: 1px solid rgba(255, 255, 255, 0.3) !important;
+        border-radius: 15px !important;
+        color: white !important;
+        padding: 1rem !important;
     }
 
-    .stNumberInput>div>div>input {
-        border-radius: 999px;
+    .stTextInput > div > div > input::placeholder,
+    .stChatInput > div > textarea::placeholder {
+        color: rgba(255, 255, 255, 0.6) !important;
     }
 
-    .stSelectbox>div>div>select {
-        border-radius: 999px;
+    /* Button styling */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 0.75rem 2rem !important;
+        font-weight: 600 !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2) !important;
+    }
+
+    .stButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3) !important;
+    }
+
+    /* Info box styling */
+    .info-card {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 12px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        border-left: 4px solid #667eea;
+    }
+
+    /* Listing card styling */
+    .listing-card {
+        background: rgba(255, 255, 255, 0.12);
+        border-radius: 15px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        transition: all 0.3s ease;
+    }
+
+    .listing-card:hover {
+        background: rgba(255, 255, 255, 0.18);
+        transform: translateY(-3px);
+        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+    }
+
+    /* Hide default streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* Improve dataframe styling */
+    .stDataFrame {
+        background: rgba(255, 255, 255, 0.1) !important;
+        border-radius: 12px !important;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# sidebar
-st.sidebar.title("Carwise AI backend")
-st.sidebar.write("Base URL")
-st.sidebar.code(DEFAULT_BASE)
-try:
-    h = health()
-    st.sidebar.success("Backend healthy")
-    if isinstance(h, dict) and h.get("mode"):
-        st.sidebar.write(f"Mode {h['mode']}")
-except Exception:
-    st.sidebar.error("Backend not reachable")
+# Initialize session state
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+if "backend_healthy" not in st.session_state:
+    try:
+        health()
+        st.session_state.backend_healthy = True
+    except:
+        st.session_state.backend_healthy = False
 
-# top title card
+# Header section
+st.markdown('<h1 class="main-header">🚗 Carwise AI</h1>', unsafe_allow_html=True)
 st.markdown(
-    """
-    <div class="glass-card">
-        <div class="glass-header">Carwise AI</div>
-        <div class="glass-subtitle">
-            Talk to the assistant about what you need in a car. It will search live listings and use VIN lookup as a bonus tool.
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
+    '<p class="sub-header">Your intelligent car shopping assistant powered by real-time data</p>',
+    unsafe_allow_html=True
 )
 
-st.write("")
+# Backend status indicator (subtle, top-right)
+if not st.session_state.backend_healthy:
+    st.error("⚠️ Backend is not reachable. Please ensure the FastAPI server is running.")
+    st.stop()
 
-# chat card
+# Main chat interface
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 
-chat_mode = st.radio(
-    "Conversation mode",
-    ["General discovery", "Talk about the last VIN"],
-    horizontal=True,
-)
+# Show example prompts if chat is empty
+if not st.session_state.chat_messages:
+    st.markdown("### 💬 What are you looking for?")
+    st.markdown("**Try asking:**")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🏠 Family SUV under $30k"):
+            st.session_state.quick_prompt = "I need a reliable family SUV with good safety ratings under $30,000"
+            st.rerun()
+    
+    with col2:
+        if st.button("⚡ Fuel-efficient sedan"):
+            st.session_state.quick_prompt = "Show me fuel-efficient sedans with at least 35 MPG"
+            st.rerun()
+    
+    with col3:
+        if st.button("🚙 Nearby used trucks"):
+            st.session_state.quick_prompt = "I'm looking for used pickup trucks within 50 miles"
+            st.rerun()
 
-if chat_mode == "General discovery":
-    render_general_chat()
-else:
-    st.markdown('<div class="glass-header">Ask about the last VIN</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="glass-subtitle">'
-        "Ask follow up questions about the car you looked up in the VIN panel below."
-        "</div>",
-        unsafe_allow_html=True,
-    )
+# Display chat history
+for msg in st.session_state.chat_messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        
+        # Display listings if present
+        if msg["role"] == "assistant" and "listings" in msg:
+            listings = msg["listings"]
+            if listings:
+                st.markdown("---")
+                st.markdown("### 🎯 Top Matches")
+                
+                for idx, car in enumerate(listings[:3], 1):
+                    with st.container():
+                        st.markdown(f"""
+                        <div class="listing-card">
+                            <h4>#{idx} - {car.get('year')} {car.get('make')} {car.get('model')}</h4>
+                            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; margin-top: 1rem;">
+                                <div><strong>💰 Price:</strong> ${car.get('price', 'N/A'):,.0f}</div>
+                                <div><strong>🛣️ Mileage:</strong> {car.get('mileage', 'N/A'):,.0f} mi</div>
+                                <div><strong>⛽ Fuel:</strong> {car.get('fuel_type', 'N/A')}</div>
+                                <div><strong>📍 Distance:</strong> {car.get('distance_miles', 'N/A'):.0f} mi</div>
+                                <div><strong>🏙️ City MPG:</strong> {car.get('city_mpg', 'N/A')}</div>
+                                <div><strong>🛣️ Hwy MPG:</strong> {car.get('highway_mpg', 'N/A')}</div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        if car.get('listing_url'):
+                            st.link_button("🔗 View Full Listing", car['listing_url'])
 
-    last_vin = st.session_state.get("last_vin")
-    if not last_vin:
-        st.info("Look up a VIN in the panel below first.")
+st.markdown('</div>', unsafe_allow_html=True)
 
-    q = st.text_input("Ask a question about the last VIN", value="")
-    if st.button("Ask about VIN", type="primary", key="ask_vin"):
-        if not last_vin:
-            st.warning("No VIN stored yet.")
-        elif not q.strip():
-            st.warning("Please enter a question.")
-        else:
-            with st.spinner("Asking Carwise AI about this car"):
-                try:
-                    reply = ask_chat(q.strip(), vin=last_vin)
-                    st.write("**Answer**")
-                    st.write(reply.get("answer") or "No answer returned.")
-                except ApiError as e:
-                    st.error(e.message)
-                except Exception:
-                    st.error("Chat request failed. Check that your LLM server is running.")
+# Chat input
+user_input = st.chat_input("Describe the car you're looking for...")
 
-st.markdown("</div>", unsafe_allow_html=True)
+# Handle quick prompt from buttons
+if "quick_prompt" in st.session_state:
+    user_input = st.session_state.quick_prompt
+    del st.session_state.quick_prompt
 
-st.write("")
+if user_input:
+    # Add user message
+    st.session_state.chat_messages.append({
+        "role": "user",
+        "content": user_input
+    })
+    
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(user_input)
+    
+    # Get AI response
+    with st.chat_message("assistant"):
+        with st.spinner("🔍 Searching live listings and analyzing..."):
+            try:
+                history_for_backend = [
+                    {"role": msg.get("role"), "content": msg.get("content")}
+                    for msg in st.session_state.chat_messages
+                    if msg.get("role") in {"user", "assistant"} and msg.get("content")
+                ][-10:]
 
-# two columns for VIN lookup and recommendations table
-left, right = st.columns(2, gap="large")
+                reply = ask_chat(user_input, vin=None, history=history_for_backend)
+                
+                answer = reply.get("answer", "I couldn't find a suitable response.")
+                # Escape markdown to prevent italic text rendering
+                st.write(answer)
+                
+                # Store assistant message with listings
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": answer
+                }
+                
+                listings = reply.get("listings", [])
+                if listings:
+                    assistant_msg["listings"] = listings
+                    
+                    st.markdown("---")
+                    st.markdown("### 🎯 Top Matches")
+                    
+                    for idx, car in enumerate(listings[:3], 1):
+                        st.markdown(f"""
+                        <div class="listing-card">
+                            <h4>#{idx} - {car.get('year')} {car.get('make')} {car.get('model')}</h4>
+                            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; margin-top: 1rem;">
+                                <div><strong>💰 Price:</strong> ${car.get('price', 'N/A'):,.0f}</div>
+                                <div><strong>🛣️ Mileage:</strong> {car.get('mileage', 'N/A'):,.0f} mi</div>
+                                <div><strong>⛽ Fuel:</strong> {car.get('fuel_type', 'N/A')}</div>
+                                <div><strong>📍 Distance:</strong> {car.get('distance_miles', 'N/A'):.0f} mi</div>
+                                <div><strong>🏙️ City MPG:</strong> {car.get('city_mpg', 'N/A')}</div>
+                                <div><strong>🛣️ Hwy MPG:</strong> {car.get('highway_mpg', 'N/A')}</div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        if car.get('listing_url'):
+                            st.link_button("🔗 View Full Listing", car['listing_url'], key=f"link_{idx}")
+                    
+                    # Show filters used
+                    filters = reply.get("filters", {})
+                    if filters:
+                        with st.expander("🔍 Search filters used"):
+                            for key, val in filters.items():
+                                if val is not None:
+                                    st.write(f"**{key.replace('_', ' ').title()}:** {val}")
+                
+                st.session_state.chat_messages.append(assistant_msg)
+                
+            except ApiError as e:
+                error_msg = f"Sorry, I encountered an error: {e.message}"
+                st.error(error_msg)
+                st.session_state.chat_messages.append({
+                    "role": "assistant",
+                    "content": error_msg
+                })
+            except Exception as e:
+                error_msg = "I'm having trouble connecting to the search service. Please make sure the backend server is running."
+                st.error(error_msg)
+                st.session_state.chat_messages.append({
+                    "role": "assistant",
+                    "content": error_msg
+                })
 
-with left:
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown('<div class="glass-header">VIN lookup</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="glass-subtitle">Use this when you already have a VIN and want details.</div>',
-        unsafe_allow_html=True,
-    )
-    car, last_vin = render_vin()
-    if last_vin:
-        st.session_state["last_vin"] = last_vin
-    st.markdown("</div>", unsafe_allow_html=True)
+# Footer with tips
+st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+st.markdown("""
+### 💡 Tips for Better Results
+- **Be specific** about your budget (e.g., "under $25,000")
+- **Mention priorities** like fuel efficiency, safety, or cargo space
+- **Include location preferences** if distance matters to you
+- **Ask follow-ups** to refine your search
+""")
+st.markdown('</div>', unsafe_allow_html=True)
 
-with right:
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown('<div class="glass-header">Recommendations table</div>', unsafe_allow_html=True)
+# Clear chat button in sidebar
+with st.sidebar:
+    st.title("⚙️ Settings")
 
-    if openapi_has_recommendations():
-        run, params = render_filters()
-        if run:
-            with st.spinner("Fetching recommendations from backend"):
-                try:
-                    path, data = try_recommendations(params)
-                    if isinstance(data, list) and data:
-                        df = render_table(data)
-                        mpg_chart(df)
-                    else:
-                        st.warning("No recommendations returned.")
-                except ApiError as e:
-                    st.error(e.message)
-                except Exception:
-                    st.error("Failed to contact recommendations endpoint.")
-    else:
-        st.info(
-            "Recommendations endpoint not available on backend yet. "
-            "This panel will enable automatically once the backend exposes /search."
-        )
+    st.markdown("### 🤖 AI Model")
+    st.info("Using GPT-4o-mini by OpenAI")
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("---")
+
+    if st.button("🗑️ Clear Chat History"):
+        st.session_state.chat_messages = []
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 📊 Backend Status")
+    st.success("✅ Connected" if st.session_state.backend_healthy else "❌ Disconnected")
+    st.caption(f"URL: {DEFAULT_BASE}")

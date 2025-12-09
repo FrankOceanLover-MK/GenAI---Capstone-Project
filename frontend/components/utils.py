@@ -141,6 +141,7 @@ def ask_chat(
     question: str,
     vin: Optional[str] = None,
     base: str = DEFAULT_BASE,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
     Call the /chat endpoint. If vin is provided the backend will
@@ -149,6 +150,13 @@ def ask_chat(
     payload: Dict[str, Any] = {"question": question}
     if vin:
         payload["vin"] = vin
+    if history:
+        # Only send the last few turns and keep role/content pairs
+        payload["history"] = [
+            {"role": item.get("role"), "content": item.get("content")}
+            for item in history
+            if item.get("role") in {"user", "assistant"} and item.get("content")
+        ][-10:]
 
     r = requests.post(f"{base}/chat", json=payload, timeout=TIMEOUT)
     data = _handle_response(r)
