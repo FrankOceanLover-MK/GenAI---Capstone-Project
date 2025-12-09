@@ -404,40 +404,44 @@ def get_car_profile_from_vin(vin: str) -> Dict[str, Any]:
 # -------------------------------------------------------------------
 
 def _map_auto_dev_listing_to_schema(item: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Adapter: Maps raw Auto.dev listing JSON to our SearchListing schema.
-    """
-    # 1. Extract core vehicle data
     vehicle = item.get("vehicle", {}) or {}
-    
-    # 2. Extract pricing/mileage from the 'retailListing' block (FIXED)
     retail = item.get("retailListing", {}) or {}
-    
+
     price = retail.get("price")
     mileage = retail.get("miles")
-    
-    # 3. Handle Distance
-    # If the API doesn't calculate it relative to us, we default to None.
-    distance = item.get("distance") 
-    
-    # 4. Flatten into our schema structure
+    distance = item.get("distance")
+
+    vin = vehicle.get("vin") or item.get("vin")
+
+    # different feeds use different names, so we try several
+    listing_url = (
+        item.get("vdp_url")
+        or item.get("vdpUrl")
+        or retail.get("url")
+        or item.get("url")
+    )
+
     return {
-        "id": item.get("id") or str(item.get("vin")),
+        "id": item.get("id") or str(vin),
         "year": vehicle.get("year"),
         "make": vehicle.get("make"),
         "model": vehicle.get("model"),
         "trim": item.get("trim") or vehicle.get("trim"),
-        "price": price,              # <--- Now correctly pulled from retail
-        "mileage": mileage,          # <--- Now correctly pulled from retail
+        "price": price,
+        "mileage": mileage,
         "distance_miles": distance,
         "fuel_type": vehicle.get("fuel"),
         "body_style": vehicle.get("bodyStyle"),
-        # MPG is missing from this API response, so these will likely remain None
-        "city_mpg": vehicle.get("cityMpg"), 
+        "city_mpg": vehicle.get("cityMpg"),
         "highway_mpg": vehicle.get("highwayMpg"),
-        "safety_rating": None, 
-        "source": "auto.dev"
+        "safety_rating": None,
+        "source": "auto.dev",
+
+        # new fields
+        "vin": vin,
+        "listing_url": listing_url,
     }
+
 
 def fetch_active_listings(
     budget: Optional[float] = None,

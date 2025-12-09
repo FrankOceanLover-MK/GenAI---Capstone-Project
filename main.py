@@ -1,6 +1,7 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
+import json
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from external_apis import get_car_profile_from_vin, ApiError as ExternalApiError  # type: ignore
@@ -13,26 +14,38 @@ from schemas import (
     SearchListing,
 )
 from llm_client import chat_completion, LLMError
-from llm_prompts import build_car_advice_messages
+from llm_prompts import (
+    build_car_advice_messages,
+    build_filter_extraction_messages,
+    build_recommendation_messages,
+)
 from search import search as search_pipeline, SearchCriteria
 
 
 app = FastAPI(title="GenAI Car Assistant Backend")
 
 
+# -------------------------------------------------------------------
+# Health
+# -------------------------------------------------------------------
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     """
     Simple health check used by the Streamlit frontend.
     """
-    return {"status": "ok", "mode": "demo"}
+    return {"status": "ok", "mode": "local_llm"}
 
+
+# -------------------------------------------------------------------
+# VIN profile utilities
+# -------------------------------------------------------------------
 
 def summarize_profile_for_llm(profile: Dict[str, Any]) -> str:
     """
-    Turn a normalized CarProfile-like dict into a compact textual summary.
+    Turn a normalized CarProfile like dict into a compact textual summary.
 
-    This is meant to be fed into the LLM so it never has to guess specs itself.
+    This is meant for LLM prompts so the model does not have to guess specs.
     """
     year = profile.get("year")
     make = profile.get("make")
@@ -54,11 +67,12 @@ def summarize_profile_for_llm(profile: Dict[str, Any]) -> str:
 
     parts: List[str] = []
 
-    # Basic identity
+    # Name
     if year and make and model:
         name = f"{year} {make} {model}"
     else:
-        name = f"{make or ''} {model or ''}".strip() or "This vehicle"
+        base = " ".join([p for p in [make, model] if p])
+        name = base or "This vehicle"
     if trim:
         name += f" {trim}"
     if body_type:
@@ -73,9 +87,9 @@ def summarize_profile_for_llm(profile: Dict[str, Any]) -> str:
     if displacement:
         engine_bits.append(f"{displacement:.1f}L")
     if cylinders:
-        engine_bits.append(f"{cylinders}-cylinder")
+        engine_bits.append(f"{cylinders} cylinder")
     if hp:
-        engine_bits.append(f"{hp} hp")
+        engine_bits.append(f"{hp} horsepower")
     engine_desc = ", ".join(engine_bits) if engine_bits else "engine specs are partially unknown"
     parts.append(f"Engine: {engine_desc}, fuel: {fuel_type}.")
 
@@ -83,11 +97,11 @@ def summarize_profile_for_llm(profile: Dict[str, Any]) -> str:
     if any(v is not None for v in (city_mpg, hwy_mpg, mixed_mpg)):
         eco_bits: List[str] = []
         if city_mpg:
-            eco_bits.append(f"city {city_mpg:.0f} mpg")
+            eco_bits.append(f"city about {city_mpg:.0f} miles per gallon")
         if hwy_mpg:
-            eco_bits.append(f"highway {hwy_mpg:.0f} mpg")
+            eco_bits.append(f"highway about {hwy_mpg:.0f} miles per gallon")
         if mixed_mpg:
-            eco_bits.append(f"mixed {mixed_mpg:.0f} mpg")
+            eco_bits.append(f"mixed about {mixed_mpg:.0f} miles per gallon")
         eco_txt = ", ".join(eco_bits)
         parts.append(f"Approximate fuel economy: {eco_txt}.")
     else:
@@ -95,6 +109,10 @@ def summarize_profile_for_llm(profile: Dict[str, Any]) -> str:
 
     return " ".join(parts)
 
+
+# -------------------------------------------------------------------
+# VIN profile routes
+# -------------------------------------------------------------------
 
 @app.get("/cars/{vin}", response_model=CarProfile)
 def get_car(vin: str) -> CarProfile:
@@ -111,7 +129,6 @@ def get_car(vin: str) -> CarProfile:
     if not profile_dict or not profile_dict.get("year"):
         raise HTTPException(status_code=404, detail="Could not decode VIN")
 
-    # Pydantic will validate / coerce for us
     return CarProfile(**profile_dict)
 
 
@@ -123,7 +140,7 @@ class CarSummaryResponse(BaseModel):
 @app.get("/cars/{vin}/summary", response_model=CarSummaryResponse)
 def get_car_summary(vin: str) -> CarSummaryResponse:
     """
-    Get a short natural-language summary of the car for use in UIs or LLM prompts.
+    Get a short natural language summary of the car.
     """
     try:
         profile_dict = get_car_profile_from_vin(vin)
@@ -139,51 +156,198 @@ def get_car_summary(vin: str) -> CarSummaryResponse:
     return CarSummaryResponse(vin=vin, summary=summary)
 
 
+# -------------------------------------------------------------------
+# Chat models
+# -------------------------------------------------------------------
+
 class ChatRequest(BaseModel):
     """
     Request body for the /chat endpoint.
 
-    For now we require a VIN so we can ground the LLM in the decoded car profile.
+    If vin is provided, the assistant talks about that specific car.
+    If vin is empty or null, the assistant goes into general discovery mode.
     """
     question: str
-    vin: str
+    vin: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
-    vin: str
-    summary: str
-    answer: str
+    """
+    Unified response for both chat modes.
 
+    mode:
+      "vin"      when answering about a specific VIN
+      "general"  when doing search and recommendations
+
+    In VIN mode filters and listings will be empty.
+    """
+    mode: str
+    question: str
+    vin: Optional[str] = None
+    summary: Optional[str] = None
+    answer: str
+    filters: Dict[str, Any] = {}
+    listings: List[SearchListing] = []
+
+
+# -------------------------------------------------------------------
+# Helper to call LLM for filters and parse the JSON
+# -------------------------------------------------------------------
+
+def _parse_number_maybe(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        # strip out non numeric characters except dot and minus
+        cleaned = "".join(ch for ch in value if ch.isdigit() or ch in {".", "-"})
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def extract_filters_from_question(question: str) -> Dict[str, Any]:
+    """
+    Use the LLM to turn a free form question into search filters.
+    """
+    messages = build_filter_extraction_messages(question)
+    try:
+        raw = chat_completion(messages, max_tokens=256, temperature=0.0)
+    except LLMError:
+        return {}
+
+    # Try direct JSON first
+    data: Any
+    try:
+        data = json.loads(raw)
+    except Exception:
+        # Try to pull out the first JSON object if the model added extra text
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return {}
+        try:
+            data = json.loads(raw[start : end + 1])
+        except Exception:
+            return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    filters: Dict[str, Any] = {}
+
+    budget = _parse_number_maybe(data.get("budget"))
+    if budget is not None and budget > 0:
+        filters["budget"] = budget
+
+    max_distance = _parse_number_maybe(data.get("max_distance"))
+    if max_distance is not None and max_distance > 0:
+        filters["max_distance"] = max_distance
+
+    body_style = data.get("body_style")
+    if isinstance(body_style, str) and body_style.strip():
+        filters["body_style"] = body_style.strip()
+
+    fuel_type = data.get("fuel_type")
+    if isinstance(fuel_type, str) and fuel_type.strip():
+        filters["fuel_type"] = fuel_type.strip()
+
+    return filters
+
+
+def build_criteria_from_filters(filters: Dict[str, Any]) -> SearchCriteria:
+    """
+    Map filter dict into a SearchCriteria dataclass.
+    """
+    return SearchCriteria(
+        budget=_parse_number_maybe(filters.get("budget")),
+        max_distance=_parse_number_maybe(filters.get("max_distance")),
+        body_style=(filters.get("body_style") or None),
+        fuel_type=(filters.get("fuel_type") or None),
+    )
+
+
+# -------------------------------------------------------------------
+# Chat endpoint
+# -------------------------------------------------------------------
 
 @app.post("/chat", response_model=ChatResponse)
 def chat_with_llm(payload: ChatRequest) -> ChatResponse:
     """
-    LLM-powered explanation endpoint.
+    LLM powered explanation endpoint.
 
-    1. Decode the VIN into a structured car profile.
-    2. Summarize that profile into text.
-    3. Send the summary + user's question to the local Llama 3 server.
-    4. Return the grounded natural-language answer.
+    VIN mode
+      Use the VIN to decode a profile and explain that specific car.
+
+    General mode
+      Use the question to infer filters, search live listings, and then explain
+      the best matches.
     """
-    vin = payload.vin.strip()
-    if not vin:
-        raise HTTPException(status_code=400, detail="vin must not be empty")
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question must not be empty")
 
+    vin = (payload.vin or "").strip()
+
+    # VIN specific mode
+    if vin:
+        try:
+            profile_dict = get_car_profile_from_vin(vin)
+        except ExternalApiError as e:  # type: ignore[misc]
+            raise HTTPException(status_code=502, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        if not profile_dict or not profile_dict.get("year"):
+            raise HTTPException(status_code=404, detail="Could not decode VIN")
+
+        summary = summarize_profile_for_llm(profile_dict)
+        messages = build_car_advice_messages(user_question=question, car_summary=summary)
+
+        try:
+            answer = chat_completion(messages)
+        except LLMError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        return ChatResponse(
+            mode="vin",
+            question=question,
+            vin=vin,
+            summary=summary,
+            answer=answer,
+            filters={},
+            listings=[],
+        )
+
+    # General discovery mode
+    filters = extract_filters_from_question(question)
+    criteria = build_criteria_from_filters(filters)
+
+    # Run search
     try:
-        profile_dict = get_car_profile_from_vin(vin)
-    except ExternalApiError as e:  # type: ignore[misc]
-        raise HTTPException(status_code=502, detail=str(e))
+        results = search_pipeline(criteria, top_k=5)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
-    if not profile_dict or not profile_dict.get("year"):
-        raise HTTPException(status_code=404, detail="Could not decode VIN")
+    listing_models: List[SearchListing] = []
+    listing_dicts: List[Dict[str, Any]] = []
+    for r in results:
+        # r.listing is already a dict from the search pipeline
+        model = SearchListing(**r.listing)
+        listing_models.append(model)
+        listing_dicts.append(model.dict())
 
-    summary = summarize_profile_for_llm(profile_dict)
-
-    messages = build_car_advice_messages(
-        user_question=payload.question,
-        car_summary=summary,
+    messages = build_recommendation_messages(
+        user_query=question,
+        filters=filters,
+        listings=listing_dicts,
     )
 
     try:
@@ -193,15 +357,27 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return ChatResponse(vin=vin, summary=summary, answer=answer)
+    return ChatResponse(
+        mode="general",
+        question=question,
+        vin=None,
+        summary=None,
+        answer=answer,
+        filters=filters,
+        listings=listing_models,
+    )
+
+
+# -------------------------------------------------------------------
+# Structured search endpoint (JSON body)
+# -------------------------------------------------------------------
 
 @app.post("/search", response_model=SearchResponse)
 def search_inventory(payload: SearchCriteriaModel) -> SearchResponse:
     """
-    Deterministic search over demo inventory.
+    Deterministic search over live inventory.
 
-    Returns scored listings with transparent breakdowns so the LLM/UI can explain
-    "why this match" without inventing numbers.
+    Returns scored listings with transparent breakdowns.
     """
     criteria = SearchCriteria(
         budget=payload.budget,
@@ -230,3 +406,61 @@ def search_inventory(payload: SearchCriteriaModel) -> SearchResponse:
         "fuel_type": payload.fuel_type,
     }
     return SearchResponse(results=serialized_results, criteria_applied=criteria_applied)
+
+
+# -------------------------------------------------------------------
+# Legacy recommendations endpoints used by try_recommendations
+# -------------------------------------------------------------------
+
+def _build_recommendations_from_params(
+    price_max: Optional[float],
+    mpg_min: Optional[float],
+    fuel: Optional[str],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    # For now we ignore mpg_min in the filter and let the scoring handle economy.
+    criteria = SearchCriteria(
+        budget=price_max,
+        max_distance=None,
+        body_style=None,
+        fuel_type=fuel,
+    )
+    results = search_pipeline(criteria, top_k=top_k)
+    recos: List[Dict[str, Any]] = []
+    for r in results:
+        item = dict(r.listing)
+        item["score"] = r.total_score
+        item["rationale"] = (
+            "Score combines price, mileage, distance, economy, and safety. "
+            "Higher score means a better overall match for the filters."
+        )
+        recos.append(item)
+    return recos
+
+
+@app.get("/cars/recommendations")
+def cars_recommendations(
+    price_max: float = Query(..., gt=0),
+    mpg_min: float = Query(0, ge=0),
+    fuel: Optional[str] = Query(None),
+    top_k: int = Query(5, ge=1, le=20),
+) -> List[Dict[str, Any]]:
+    """
+    Recommendation endpoint that matches the older frontend helper.
+
+    It returns a list of plain dicts, one per listing.
+    """
+    return _build_recommendations_from_params(price_max, mpg_min, fuel, top_k)
+
+
+@app.get("/recommendations")
+def recommendations(
+    price_max: float = Query(..., gt=0),
+    mpg_min: float = Query(0, ge=0),
+    fuel: Optional[str] = Query(None),
+    top_k: int = Query(5, ge=1, le=20),
+) -> List[Dict[str, Any]]:
+    """
+    Alias for /cars/recommendations so the frontend can try both paths.
+    """
+    return _build_recommendations_from_params(price_max, mpg_min, fuel, top_k)

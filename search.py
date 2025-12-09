@@ -1,10 +1,10 @@
-"""Deterministic filtering and scoring for local car listings."""
+"""Deterministic filtering and scoring for live car listings."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-# CHANGE: Import the new fetcher instead of SAMPLE_LISTINGS
 from external_apis import fetch_active_listings
 
 
@@ -16,16 +16,25 @@ class ScoreBreakdown:
     economy: float
     safety: float
 
+    @property
     def total(self) -> float:
-        # Simple weighted sum; weights sum to 1.0
-        return round(
-            0.32 * self.price
-            + 0.2 * self.mileage
-            + 0.18 * self.distance
-            + 0.2 * self.economy
-            + 0.1 * self.safety,
-            3,
+        return (
+            0.30 * self.price
+            + 0.25 * self.mileage
+            + 0.15 * self.distance
+            + 0.20 * self.economy
+            + 0.10 * self.safety
         )
+
+
+@dataclass
+class ListingWithScore:
+    listing: Dict[str, Any]
+    breakdown: ScoreBreakdown
+
+    @property
+    def total_score(self) -> float:
+        return self.breakdown.total
 
 
 @dataclass
@@ -36,40 +45,29 @@ class SearchCriteria:
     fuel_type: Optional[str] = None
 
 
-@dataclass
-class ListingWithScore:
-    listing: Dict[str, Any]
-    breakdown: ScoreBreakdown
-
-    @property
-    def total_score(self) -> float:
-        return self.breakdown.total()
-
-
-# ----------------------------------------------------------------------------
-# Scoring helpers (Restored)
-# ----------------------------------------------------------------------------
-
-def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
-    return max(low, min(value, high))
+def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, x))
 
 
 def _price_score(price: Optional[float], budget: Optional[float]) -> float:
     if price is None:
-        return 0.4  # unknown price: downgrade confidence
+        return 0.5
     if budget is None:
-        return 0.6  # budget not provided: neutral-ish
-    # Score is 1.0 when price <= budget, decays as it exceeds budget
+        return 0.6
+
     if price <= budget:
-        return 1.0
-    # allow up to 20% over budget but penalize sharply
-    return _clamp(1 - ((price - budget) / (budget * 0.2)))
+        if price >= 0.7 * budget:
+            return 1.0
+        return 0.6 + 0.4 * (price / (0.7 * budget))
+    over = price - budget
+    if over <= 0.1 * budget:
+        return 0.6 * (1 - over / (0.1 * budget))
+    return 0.05
 
 
 def _mileage_score(mileage: Optional[float]) -> float:
     if mileage is None:
         return 0.5
-    # 0-30k miles is great, 30k-90k tapers, >120k poor
     if mileage <= 30000:
         return 1.0
     if mileage <= 90000:
@@ -79,70 +77,102 @@ def _mileage_score(mileage: Optional[float]) -> float:
     return 0.05
 
 
-def _distance_score(distance: Optional[float], max_distance: Optional[float]) -> float:
-    if distance is None:
-        return 0.4
+def _distance_score(distance_miles: Optional[float], max_distance: Optional[float]) -> float:
+    if distance_miles is None:
+        return 0.5
     if max_distance is None:
-        # still prefer closer cars
-        return _clamp(1 - (distance / 200))
-    if distance <= max_distance:
+        max_distance = 100.0
+    if distance_miles <= max_distance:
         return 1.0
-    # Past the limit, decay to 0 at 2x the limit
-    return _clamp(1 - ((distance - max_distance) / max(max_distance, 1)))
+    if distance_miles <= 2 * max_distance:
+        return _clamp(1 - (distance_miles - max_distance) / max_distance)
+    return 0.05
 
 
 def _economy_score(city_mpg: Optional[float], highway_mpg: Optional[float]) -> float:
-    mpg_values = [v for v in (city_mpg, highway_mpg) if v]
-    if not mpg_values:
+    if city_mpg is None and highway_mpg is None:
         return 0.5
-    avg_mpg = sum(mpg_values) / len(mpg_values)
-    # 50+ mpg is excellent, 25 mpg is average; clamp accordingly
-    return _clamp((avg_mpg - 20) / 30)
+    mpg = 0.0
+    weight = 0.0
+    if city_mpg is not None:
+        mpg += 0.6 * city_mpg
+        weight += 0.6
+    if highway_mpg is not None:
+        mpg += 0.4 * highway_mpg
+        weight += 0.4
+    if weight == 0:
+        return 0.5
+    mpg /= weight
+
+    if mpg <= 20:
+        return 0.2
+    if mpg >= 35:
+        return 1.0
+    return 0.2 + 0.8 * ((mpg - 20) / 15.0)
 
 
-def _safety_score(rating: Optional[float]) -> float:
-    if rating is None:
-        return 0.6
-    return _clamp(rating / 5)
+def _safety_score(stars: Optional[float]) -> float:
+    if stars is None:
+        return 0.5
+    return _clamp(stars / 5.0)
 
 
 def score_listing(listing: Dict[str, Any], criteria: SearchCriteria) -> ListingWithScore:
-    breakdown = ScoreBreakdown(
-        price=_price_score(listing.get("price"), criteria.budget),
-        mileage=_mileage_score(listing.get("mileage")),
-        distance=_distance_score(listing.get("distance_miles"), criteria.max_distance),
-        economy=_economy_score(listing.get("city_mpg"), listing.get("highway_mpg")),
-        safety=_safety_score(listing.get("safety_rating")),
+    price = listing.get("price")
+    mileage = listing.get("mileage")
+    distance_miles = listing.get("distance_miles")
+    city_mpg = listing.get("city_mpg")
+    highway_mpg = listing.get("highway_mpg")
+    safety = listing.get("safety_rating")
+
+    bd = ScoreBreakdown(
+        price=_price_score(price, criteria.budget),
+        mileage=_mileage_score(mileage),
+        distance=_distance_score(distance_miles, criteria.max_distance),
+        economy=_economy_score(city_mpg, highway_mpg),
+        safety=_safety_score(safety),
     )
-    return ListingWithScore(listing=listing, breakdown=breakdown)
+
+    return ListingWithScore(listing=listing, breakdown=bd)
 
 
-# ----------------------------------------------------------------------------
-# Search pipeline
-# ----------------------------------------------------------------------------
+def _passes_filters(listing: Dict[str, Any], criteria: SearchCriteria) -> bool:
+    if criteria.budget is not None:
+        price = listing.get("price")
+        if price is None or price > criteria.budget * 1.15:
+            return False
 
-def filter_listings(criteria: SearchCriteria) -> List[Dict[str, Any]]:
-    """
-    Deprecated: We now rely on the API to filter, but we keep this
-    if we need to do any secondary post-filtering locally.
-    """
-    # This is handled mostly by the API now, but we can leave it empty or 
-    # reuse it for logic the API doesn't support.
-    return [] 
+    if criteria.body_style:
+        body_style = (listing.get("body_style") or "").lower()
+        if criteria.body_style.lower() not in body_style:
+            return False
+
+    if criteria.fuel_type:
+        fuel = (listing.get("fuel_type") or "").lower()
+        if criteria.fuel_type.lower() not in fuel:
+            return False
+
+    if criteria.max_distance is not None:
+        dist = listing.get("distance_miles")
+        if dist is not None and dist > criteria.max_distance * 1.5:
+            return False
+
+    return True
 
 
 def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
-    """Filter, score, and rank listings."""
-    
-    # 1. Fetch REAL listings from Auto.dev
+    """
+    Fetch real listings from Auto.dev and score them.
+    """
     candidates = fetch_active_listings(
         budget=criteria.budget,
-        min_year=2015, # Optional default to keep results relevant
+        min_year=2015,
         body_style=criteria.body_style,
-        limit=20
+        limit=20,
     )
 
-    # 2. Score and rank them
+    candidates = [c for c in candidates if _passes_filters(c, criteria)]
+
     scored = [score_listing(item, criteria) for item in candidates]
     scored.sort(key=lambda s: s.total_score, reverse=True)
     return scored[:top_k]

@@ -14,26 +14,39 @@ class EngineSummary(BaseModel):
 class EconomySummary(BaseModel):
     city_mpg: Optional[float] = None
     highway_mpg: Optional[float] = None
-    mixed_mpg: Optional[float] = None
-    source: Optional[str] = None
+    mpge: Optional[float] = None
 
 
 class SafetySummary(BaseModel):
-    nhtsa_stars: Optional[int] = None
-    source: Optional[str] = None
+    nhtsa_stars: Optional[float] = None
+    notes: Optional[str] = None
 
 
 class CarProfile(BaseModel):
     vin: str
-    year: Optional[int]
-    make: Optional[str]
-    model: Optional[str]
-    trim: Optional[str]
-    type: Optional[str]
-    origin: Optional[str]
-    engine: EngineSummary
-    economy: EconomySummary
-    safety: SafetySummary
+    year: Optional[int] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    trim: Optional[str] = None
+
+    body_style: Optional[str] = None
+    mileage: Optional[int] = None
+    price: Optional[float] = None
+
+    fuel_type: Optional[str] = None
+    drivetrain: Optional[str] = None
+    origin: Optional[str] = None
+
+    engine: Optional[EngineSummary] = None
+    economy: Optional[EconomySummary] = None
+    safety: Optional[SafetySummary] = None
+
+    # Keep any extra backend fields
+    extra: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        extra = "allow"
+
 
 class ScoreBreakdownModel(BaseModel):
     price: float
@@ -45,17 +58,33 @@ class ScoreBreakdownModel(BaseModel):
 
 
 class SearchCriteriaModel(BaseModel):
-    budget: Optional[float] = Field(None, description="Maximum budget in USD")
-    max_distance: Optional[float] = Field(None, description="Max delivery distance in miles")
-    body_style: Optional[str] = Field(None, description="Desired body style (SUV, Sedan, etc.)")
-    fuel_type: Optional[str] = Field(None, description="Fuel type preference (Gasoline, Hybrid, Electric)")
+    budget: Optional[int] = Field(
+        None,
+        description="Maximum budget in US dollars.",
+    )
+    max_distance: Optional[float] = Field(
+        None,
+        description="Maximum distance in miles for listings.",
+    )
+    body_style: Optional[str] = Field(
+        None,
+        description="Desired body style such as suv, sedan, truck.",
+    )
+    fuel_type: Optional[str] = Field(
+        None,
+        description="Desired fuel type such as gasoline, hybrid, electric.",
+    )
+    top_k: Optional[int] = Field(
+        5,
+        description="Maximum number of results to return.",
+    )
 
 
 class SearchListing(BaseModel):
-    id: str
-    year: int
-    make: str
-    model: str
+    id: Optional[str] = None
+    year: Optional[int] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
     trim: Optional[str] = None
     price: Optional[float] = None
     mileage: Optional[float] = None
@@ -66,6 +95,11 @@ class SearchListing(BaseModel):
     highway_mpg: Optional[float] = None
     safety_rating: Optional[float] = None
     source: Optional[str] = None
+
+    # new fields
+    vin: Optional[str] = None
+    listing_url: Optional[str] = None
+
 
 
 class SearchResult(BaseModel):
