@@ -137,21 +137,38 @@ def score_listing(listing: Dict[str, Any], criteria: SearchCriteria) -> ListingW
 
 
 def _passes_filters(listing: Dict[str, Any], criteria: SearchCriteria) -> bool:
+    # Budget filter - more flexible
     if criteria.budget is not None:
         price = listing.get("price")
-        if price is None or price > criteria.budget * 1.15:
+        if price is None:
+            return False
+        # Allow slight over-budget (10%) for scoring to handle
+        if price > criteria.budget * 1.15:
             return False
 
+    # Body style filter - handle "not SUV" case
     if criteria.body_style:
         body_style = (listing.get("body_style") or "").lower()
-        if criteria.body_style.lower() not in body_style:
-            return False
+        criteria_style = criteria.body_style.lower()
+        
+        # Handle negative filters like "not SUV"
+        if criteria_style.startswith("not "):
+            excluded_style = criteria_style[4:].strip()
+            if excluded_style in body_style:
+                return False
+        else:
+            # Positive filter - must contain the style
+            if criteria_style not in body_style:
+                return False
 
+    # Fuel type filter
     if criteria.fuel_type:
         fuel = (listing.get("fuel_type") or "").lower()
-        if criteria.fuel_type.lower() not in fuel:
+        criteria_fuel = criteria.fuel_type.lower()
+        if criteria_fuel not in fuel:
             return False
 
+    # Distance filter - more flexible
     if criteria.max_distance is not None:
         dist = listing.get("distance_miles")
         if dist is not None and dist > criteria.max_distance * 1.5:
@@ -164,15 +181,35 @@ def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
     """
     Fetch real listings from Auto.dev and score them.
     """
+    # First, let's see what the API returns
     candidates = fetch_active_listings(
         budget=criteria.budget,
         min_year=2015,
+        make=None,  # Don't filter by make
         body_style=criteria.body_style,
-        limit=20,
+        limit=30,  # Get more candidates
     )
-
-    candidates = [c for c in candidates if _passes_filters(c, criteria)]
-
-    scored = [score_listing(item, criteria) for item in candidates]
+    
+    print(f"[DEBUG] Fetched {len(candidates)} candidates from API")
+    
+    if candidates:
+        print(f"[DEBUG] Sample candidate: {candidates[0].get('make')} {candidates[0].get('model')}")
+    
+    # Apply filters
+    filtered = [c for c in candidates if _passes_filters(c, criteria)]
+    print(f"[DEBUG] {len(filtered)} candidates passed filters")
+    
+    # Score all filtered candidates
+    scored = [score_listing(item, criteria) for item in filtered]
+    
+    # Sort by score
     scored.sort(key=lambda s: s.total_score, reverse=True)
-    return scored[:top_k]
+    
+    # Return top K
+    result = scored[:top_k]
+    print(f"[DEBUG] Returning {len(result)} results")
+    
+    for i, r in enumerate(result[:3]):  # Show first 3 for debugging
+        print(f"[DEBUG] Result {i}: {r.listing.get('make')} {r.listing.get('model')} - Score: {r.total_score:.2f}")
+    
+    return result

@@ -1,11 +1,12 @@
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import urllib.parse
 
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()  # loads .env from project root
+load_dotenv()
 
 AUTO_DEV_API_KEY = os.getenv("AUTO_DEV_API_KEY")
 
@@ -29,7 +30,6 @@ def cache_get(key: str):
         return None
     ts, value = item
     if now - ts > CACHE_TTL:
-        # expired
         _CACHE.pop(key, None)
         return None
     return value
@@ -46,8 +46,6 @@ def cache_set(key: str, value: Any):
 def auto_dev_vin_decode(vin: str) -> Dict[str, Any]:
     """
     Call Auto.dev VIN Decode API and return JSON.
-    Docs: GET https://api.auto.dev/vin/{vin}
-    Authorization: Bearer <API_KEY>
     """
     if not AUTO_DEV_API_KEY:
         raise ApiError("AUTO_DEV_API_KEY is not set")
@@ -62,43 +60,29 @@ def auto_dev_vin_decode(vin: str) -> Dict[str, Any]:
         "Authorization": f"Bearer {AUTO_DEV_API_KEY}",
         "Content-Type": "application/json",
     }
-    resp = requests.get(url, headers=headers, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-
-    cache_set(cache_key, data)
-    return data
-
-
-# (Unused, but kept here if you ever upgrade plans)
-def auto_dev_specs(vin: str) -> Dict[str, Any]:
-    if not AUTO_DEV_API_KEY:
-        raise ApiError("AUTO_DEV_API_KEY is not set")
-
-    url = f"https://api.auto.dev/specs/{vin}"
-    headers = {
-        "Authorization": f"Bearer {AUTO_DEV_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    resp = requests.get(url, headers=headers, timeout=10)
-
-    if resp.status_code == 402:
-        # specs endpoint not available on this plan
-        print("Auto.dev specs endpoint not available on this plan (402 Payment Required)")
-        return {}
-
-    resp.raise_for_status()
-    return resp.json()
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        # Validate response has required fields
+        if not data or not isinstance(data, dict):
+            raise ApiError(f"Invalid response from Auto.dev for VIN {vin}")
+        
+        cache_set(cache_key, data)
+        return data
+    except requests.exceptions.RequestException as e:
+        raise ApiError(f"Auto.dev API error: {str(e)}")
 
 
 # -------------------------------------------------------------------
-# 2) NHTSA vPIC – decode VIN (free, no key)
+# 2) NHTSA vPIC – decode VIN
 # -------------------------------------------------------------------
 
 def nhtsa_decode_vin(vin: str, model_year: int | None = None) -> Dict[str, Any]:
     """
-    Use NHTSA vPIC DecodeVinValues endpoint (returns a flat JSON object).
-    Docs: /api/vehicles/DecodeVinValues/{vin}?format=json&modelyear=YYYY
+    Use NHTSA vPIC DecodeVinValues endpoint.
     """
     cache_key = f"nhtsa_vin:{vin}:{model_year or ''}"
     cached = cache_get(cache_key)
@@ -111,14 +95,19 @@ def nhtsa_decode_vin(vin: str, model_year: int | None = None) -> Dict[str, Any]:
         params["modelyear"] = model_year
 
     url = f"{base}/{vin}"
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    results = data.get("Results") or []
-    flat = results[0] if results else {}
+    
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("Results") or []
+        flat = results[0] if results else {}
 
-    cache_set(cache_key, flat)
-    return flat
+        cache_set(cache_key, flat)
+        return flat
+    except requests.exceptions.RequestException as e:
+        print(f"NHTSA API warning: {e}")
+        return {}
 
 
 # -------------------------------------------------------------------
@@ -128,8 +117,6 @@ def nhtsa_decode_vin(vin: str, model_year: int | None = None) -> Dict[str, Any]:
 def carquery_get_trims(make: str, model: str, year: int) -> List[Dict[str, Any]]:
     """
     Call CarQuery getTrims to get trims/specs by year/make/model.
-    If CarQuery blocks us (403), just return [] so the rest of the
-    pipeline can still work.
     """
     cache_key = f"carquery_trims:{year}:{make}:{model}"
     cached = cache_get(cache_key)
@@ -143,33 +130,31 @@ def carquery_get_trims(make: str, model: str, year: int) -> List[Dict[str, Any]]
         "model": model,
         "year": year,
     }
-    # some services block requests without a browser-like User-Agent
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; CarWiseBackend/0.1; +https://example.com)"
     }
 
-    resp = requests.get(url, params=params, headers=headers, timeout=10)
-
-    if resp.status_code == 403:
-        print("CarQuery returned 403 Forbidden; skipping trims and returning [].")
-        cache_set(cache_key, [])
-        return []
-
     try:
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+
+        if resp.status_code == 403:
+            print("CarQuery returned 403 Forbidden; skipping trims.")
+            cache_set(cache_key, [])
+            return []
+
         resp.raise_for_status()
-    except requests.HTTPError as e:
+        data = resp.json()
+        trims = data.get("Trims", []) or []
+        cache_set(cache_key, trims)
+        return trims
+    except requests.exceptions.RequestException as e:
         print(f"CarQuery error: {e}")
         cache_set(cache_key, [])
         return []
 
-    data = resp.json()
-    trims = data.get("Trims", []) or []
-    cache_set(cache_key, trims)
-    return trims
-
 
 # -------------------------------------------------------------------
-# 4) helpers for fuel economy conversions
+# 4) Fuel economy helpers
 # -------------------------------------------------------------------
 
 def _parse_float(value: Any) -> Optional[float]:
@@ -181,41 +166,30 @@ def _parse_float(value: Any) -> Optional[float]:
         return None
 
 
-def l_per_100km_to_mpg(l_per_100km: Optional[float]) -> Optional[float]:
-    """
-    Convert liters/100km to miles per gallon.
-    If input is None or 0, return None.
-    """
-    if not l_per_100km:
+def _parse_int(value: Any) -> Optional[int]:
+    if not value:
         return None
-    # standard conversion factor
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return None
+
+
+def l_per_100km_to_mpg(l_per_100km: Optional[float]) -> Optional[float]:
+    """Convert liters/100km to miles per gallon."""
+    if not l_per_100km or l_per_100km <= 0:
+        return None
     return round(235.214 / l_per_100km, 1)
 
 
 def get_economy_from_carquery(year: int, make: str, model: str) -> Dict[str, Any]:
     """
     Use CarQuery trims as the source of fuel economy data.
-
-    Returns something like:
-    {
-        "fuel_type": "Premium Unleaded (Required)",
-        "city_l_per_100km": 19.0,
-        "highway_l_per_100km": 27.0,
-        "mixed_l_per_100km": 22.0,
-        "city_mpg": 12.4,
-        "highway_mpg": 8.7,
-        "mixed_mpg": 10.7,
-        "source": "carquery",
-        "trim_used": "Carrera 2dr Coupe (3.4L 6cyl 7M)",
-    }
-
-    If CarQuery returns nothing, returns {}.
     """
     trims = carquery_get_trims(make=make, model=model, year=year)
     if not trims:
         return {}
 
-    # simplest choice: just take the first trim
     t = trims[0]
 
     city_l = _parse_float(t.get("model_lkm_city"))
@@ -236,55 +210,58 @@ def get_economy_from_carquery(year: int, make: str, model: str) -> Dict[str, Any
 
     return economy
 
+
 # -------------------------------------------------------------------
-# 7) NHTSA 5-Star Safety Ratings (The Enrichment)
+# 5) NHTSA 5-Star Safety Ratings (FIXED)
 # -------------------------------------------------------------------
+
 def get_safety_rating(year: int, make: str, model: str) -> Optional[int]:
     """
-    Query NHTSA 5-Star Safety Ratings.
-    Step 1: Get VehicleId for Year/Make/Model
-    Step 2: Get OverallRating for VehicleId
+    Query NHTSA 5-Star Safety Ratings with proper URL encoding.
     """
-    # 1. Check Cache
     cache_key = f"nhtsa_safety:{year}:{make}:{model}"
     cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
-    # Basic cleaning
     if not year or not make or not model:
         return None
 
     try:
-        # Step 1: Find the specific Vehicle ID
-        # Endpoint: /SafetyRatings/modelyear/{year}/make/{make}/model/{model}
-        base_url = "https://api.nhtsa.gov/SafetyRatings"
-        query_url = f"{base_url}/modelyear/{year}/make/{make}/model/{model}"
-
-        #Debug:
-
-        print(f"DEBUG NHTSA QUERY: {query_url}")
+        # FIXED: Properly encode make and model for URLs
+        # This handles spaces and special characters correctly
+        make_encoded = urllib.parse.quote(str(make).strip())
+        model_encoded = urllib.parse.quote(str(model).strip())
         
-        resp = requests.get(query_url, timeout=5)
+        base_url = "https://api.nhtsa.gov/SafetyRatings"
+        query_url = f"{base_url}/modelyear/{year}/make/{make_encoded}/model/{model_encoded}"
+        
+        resp = requests.get(query_url, timeout=10)
+        
         if resp.status_code != 200:
             cache_set(cache_key, None)
             return None
             
         data = resp.json()
         results = data.get("Results", [])
+        
         if not results:
             cache_set(cache_key, None)
             return None
             
-        # Just pick the first variant found
         vehicle_id = results[0].get("VehicleId")
         if not vehicle_id:
             cache_set(cache_key, None)
             return None
 
-        # Step 2: Get Rating for that Vehicle ID
+        # Get rating for that vehicle
         rating_url = f"{base_url}/VehicleId/{vehicle_id}"
-        resp_rating = requests.get(rating_url, timeout=5)
+        resp_rating = requests.get(rating_url, timeout=10)
+        
+        if resp_rating.status_code != 200:
+            cache_set(cache_key, None)
+            return None
+            
         rating_data = resp_rating.json()
         rating_results = rating_data.get("Results", [])
         
@@ -294,9 +271,8 @@ def get_safety_rating(year: int, make: str, model: str) -> Optional[int]:
             
         overall_str = rating_results[0].get("OverallRating", "")
         
-        # Convert "5" string to 5 int
         try:
-            rating = int(overall_str)
+            rating = int(overall_str) if overall_str else None
         except ValueError:
             rating = None
             
@@ -304,42 +280,28 @@ def get_safety_rating(year: int, make: str, model: str) -> Optional[int]:
         return rating
 
     except Exception as e:
-        print(f"NHTSA Safety API Error: {e}")
+        print(f"NHTSA Safety API Error for {year} {make} {model}: {e}")
+        cache_set(cache_key, None)
         return None
 
-
-def _parse_int(value: Any) -> Optional[int]:
-    if not value: # Handles None and ""
-        return None
-    try:
-        return int(float(value)) # Handle "4.0" strings safely
-    except (ValueError, TypeError):
-        return None
 
 # -------------------------------------------------------------------
-# 5) High-level profile helper
+# 6) High-level profile helper
 # -------------------------------------------------------------------
 
 def get_car_profile_from_vin(vin: str) -> Dict[str, Any]:
     """
-    High-level helper: given a VIN, combine Auto.dev (VIN decode),
-    NHTSA (extra specs), and CarQuery (fuel economy) into one
-    normalized dict.
-
-    This is what FastAPI route and LLM logic will use.
+    Combine Auto.dev, NHTSA, and CarQuery data into one normalized profile.
     """
-
-    # 1) Decode VIN with Auto.dev – this is our primary source for year/make/model.
+    # Decode VIN with Auto.dev
     auto_data = auto_dev_vin_decode(vin)
 
-    # 2) Decode VIN with NHTSA – secondary source and extra technical details.
+    # Decode VIN with NHTSA
     nhtsa_data = nhtsa_decode_vin(vin)
 
-    # 3) Pull core identity (year / make / model).
-    #    Prefer Auto.dev's nested "vehicle" object, but fall back to NHTSA / top-level.
+    # Extract core identity
     vehicle = auto_data.get("vehicle", {}) or {}
 
-    # Year may be int (Auto.dev) or string (NHTSA), so be a bit defensive.
     year = vehicle.get("year")
     if year is None:
         model_year_str = nhtsa_data.get("ModelYear")
@@ -347,35 +309,41 @@ def get_car_profile_from_vin(vin: str) -> Dict[str, Any]:
 
     make = vehicle.get("make") or auto_data.get("make") or nhtsa_data.get("Make")
     model = vehicle.get("model") or auto_data.get("model") or nhtsa_data.get("Model")
-
-    # Trim: Auto.dev has a nice top-level "trim"; fall back to NHTSA's "Trim".
     trim = auto_data.get("trim") or nhtsa_data.get("Trim")
 
-    # 4) Ask CarQuery for fuel economy data (city/highway/mixed MPG + fuel type).
-    economy = get_economy_from_carquery(year=year, make=make, model=model)
+    # Get fuel economy data
+    economy = {}
+    if year and make and model:
+        try:
+            economy = get_economy_from_carquery(year=year, make=make, model=model)
+        except Exception as e:
+            print(f"CarQuery economy lookup failed: {e}")
 
-    # Fetch Safety Rating
-    safety_stars = get_safety_rating(year, make, model)
+    # Get safety rating
+    safety_stars = None
+    if year and make and model:
+        try:
+            safety_stars = get_safety_rating(year, make, model)
+        except Exception as e:
+            print(f"Safety rating lookup failed: {e}")
 
-    # 5) Build a clean, compact profile that your app / LLM can rely on.
+    # Build profile
     profile: Dict[str, Any] = {
         "vin": vin,
         "year": year,
         "make": make,
         "model": model,
         "trim": trim,
-        "type": auto_data.get("type"),      # e.g. "Passenger Car"
-        "origin": auto_data.get("origin"),  # e.g. "Germany"
+        "type": auto_data.get("type"),
+        "origin": auto_data.get("origin"),
 
-        # Engine summary from NHTSA + fuel type from CarQuery when available.
         "engine": {
-            "displacement_l": _parse_float(nhtsa_data.get("DisplacementL")), # Use existing float helper
-            "cylinders": _parse_int(nhtsa_data.get("EngineCylinders")),      # Use new int helper
-            "hp": _parse_int(nhtsa_data.get("EngineHP")),                    # Use new int helper
+            "displacement_l": _parse_float(nhtsa_data.get("DisplacementL")),
+            "cylinders": _parse_int(nhtsa_data.get("EngineCylinders")),
+            "hp": _parse_int(nhtsa_data.get("EngineHP")),
             "fuel_type": economy.get("fuel_type") or nhtsa_data.get("FuelTypePrimary"),
         },
 
-        # Fuel economy in MPG from CarQuery helper.
         "economy": {
             "city_mpg": economy.get("city_mpg"),
             "highway_mpg": economy.get("highway_mpg"),
@@ -387,23 +355,17 @@ def get_car_profile_from_vin(vin: str) -> Dict[str, Any]:
             "nhtsa_stars": safety_stars,
             "source": "nhtsa" if safety_stars else None
         }
-
-        # If you want raw payloads for debugging, you can uncomment these,
-        # but they may be large and include personal data from Auto.dev:
-        # "auto_dev_raw": auto_data,
-        # "nhtsa_raw": nhtsa_data,
     }
 
     return profile
 
 
-# [ADD TO external_apis.py]
-
 # -------------------------------------------------------------------
-# 6) Auto.dev Listings Search (The New Fetcher)
+# 7) Auto.dev Listings Search (Enhanced with better error handling)
 # -------------------------------------------------------------------
 
 def _map_auto_dev_listing_to_schema(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Map Auto.dev listing format to our internal schema."""
     vehicle = item.get("vehicle", {}) or {}
     retail = item.get("retailListing", {}) or {}
 
@@ -412,17 +374,33 @@ def _map_auto_dev_listing_to_schema(item: Dict[str, Any]) -> Dict[str, Any]:
     distance = item.get("distance")
 
     vin = vehicle.get("vin") or item.get("vin")
-
-    # different feeds use different names, so we try several
-    listing_url = (
-        item.get("vdp_url")
-        or item.get("vdpUrl")
-        or retail.get("url")
-        or item.get("url")
-    )
+    
+    # Get listing ID for constructing URL
+    listing_id = item.get("id")
+    
+    # Try multiple URL sources
+    listing_url = None
+    url_sources = [
+        retail.get("vdp"),        # Primary field
+        item.get("vdp_url"),
+        item.get("vdpUrl"),
+        retail.get("url"),
+        item.get("url"),
+    ]
+    
+    for url in url_sources:
+        if url and isinstance(url, str) and url.startswith(("http://", "https://")):
+            listing_url = url
+            break
+    
+    # If no URL found, construct one from listing ID
+    if not listing_url and listing_id:
+        listing_url = f"https://auto.dev/listings/{listing_id}"
+    elif not listing_url and vin:
+        listing_url = f"https://auto.dev/inventory/{vin}"
 
     return {
-        "id": item.get("id") or str(vin),
+        "id": item.get("id") or str(vin) or f"listing_{id(item)}",
         "year": vehicle.get("year"),
         "make": vehicle.get("make"),
         "model": vehicle.get("model"),
@@ -434,10 +412,8 @@ def _map_auto_dev_listing_to_schema(item: Dict[str, Any]) -> Dict[str, Any]:
         "body_style": vehicle.get("bodyStyle"),
         "city_mpg": vehicle.get("cityMpg"),
         "highway_mpg": vehicle.get("highwayMpg"),
-        "safety_rating": None,
+        "safety_rating": None,  # Can be enriched later
         "source": "auto.dev",
-
-        # new fields
         "vin": vin,
         "listing_url": listing_url,
     }
@@ -451,7 +427,7 @@ def fetch_active_listings(
     limit: int = 15
 ) -> List[Dict[str, Any]]:
     """
-    Call Auto.dev GET /listings to find real cars.
+    Call Auto.dev GET /listings to find real cars with enhanced error handling.
     """
     if not AUTO_DEV_API_KEY:
         print("Warning: AUTO_DEV_API_KEY not set. Returning empty results.")
@@ -459,15 +435,13 @@ def fetch_active_listings(
 
     url = "https://api.auto.dev/listings"
     
-    # Updated Params based on Auto.dev Docs
     params = {
-        "apikey": AUTO_DEV_API_KEY, 
+        "apikey": AUTO_DEV_API_KEY,
         "limit": limit,
     }
     
-    # Use dot-notation keys as per Auto.dev documentation
+    # Build filters based on Auto.dev API documentation
     if budget:
-        # Auto.dev often uses ranges for price, e.g., "1-30000"
         params["retailListing.price"] = f"1-{int(budget)}"
     if min_year:
         params["vehicle.year"] = f"{min_year}-2025"
@@ -485,30 +459,40 @@ def fetch_active_listings(
         resp = requests.get(url, params=params, headers=headers, timeout=30)
         
         if resp.status_code != 200:
-            print(f"Auto.dev listings error: {resp.status_code} - {resp.text}")
+            print(f"Auto.dev listings error: {resp.status_code}")
+            try:
+                error_detail = resp.json()
+                print(f"Error details: {error_detail}")
+            except:
+                print(f"Response text: {resp.text[:500]}")
             return []
             
         data = resp.json()
-        
-        # FIX: The key is 'data', not 'records'
         raw_listings = data.get("data", [])
+        
+        if not raw_listings:
+            print("No listings returned from Auto.dev")
+            return []
         
         clean_listings = []
         for raw in raw_listings:
-
-            ##print("DEBUG RAW ITEM:", raw)
-            
             try:
                 clean = _map_auto_dev_listing_to_schema(raw)
-                # Ensure we have the basics
-                if clean["year"] and clean["make"] and clean["model"]:
+                # Validate minimum required fields
+                if clean.get("year") and clean.get("make") and clean.get("model"):
                     clean_listings.append(clean)
+                else:
+                    print(f"Skipping listing with missing core fields: {clean.get('id')}")
             except Exception as e:
-                print(f"Skipping malformed listing: {e}")
+                print(f"Error mapping listing: {e}")
                 continue
                 
+        print(f"Successfully processed {len(clean_listings)} listings from Auto.dev")
         return clean_listings
 
+    except requests.exceptions.Timeout:
+        print("Auto.dev listings request timed out")
+        return []
     except Exception as e:
         print(f"Failed to fetch listings: {e}")
         return []
