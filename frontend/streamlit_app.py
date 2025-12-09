@@ -324,10 +324,16 @@ st.markdown('</div>', unsafe_allow_html=True)
 # Clear chat button in sidebar
 with st.sidebar:
     st.title("⚙️ Settings")
+
+    st.markdown("### 🤖 AI Model")
+    st.info("Using GPT-4o-mini by OpenAI")
+
+    st.markdown("---")
+
     if st.button("🗑️ Clear Chat History"):
         st.session_state.chat_messages = []
         st.rerun()
-    
+
     st.markdown("---")
     st.markdown("### 📊 Backend Status")
     st.success("✅ Connected" if st.session_state.backend_healthy else "❌ Disconnected")

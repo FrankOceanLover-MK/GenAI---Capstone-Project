@@ -4,10 +4,10 @@ import requests
 import sys
 
 
-# Ollama configuration - Note: No /v1 suffix for Ollama!
-LLM_API_BASE = "http://127.0.0.1:11434"  # Use Ollama
-LLM_MODEL_NAME = "llama3.2"
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+# OpenAI GPT-4o-mini configuration
+LLM_API_BASE = "https://api.openai.com/v1"
+LLM_MODEL_NAME = "gpt-4o-mini"
+LLM_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
 
 print(f"[DEBUG] Loaded LLM_API_BASE: {LLM_API_BASE}", file=sys.stderr)
@@ -23,36 +23,36 @@ def chat_completion(
     temperature: float = 0.3,
 ) -> str:
     """
-    Call Ollama's /api/chat endpoint (OpenAI-compatible format).
-    
-    Ollama uses /api/chat, not /v1/chat/completions
-    """
+    Call OpenAI GPT-4o-mini API.
 
-    # Remove any trailing slashes and /v1 suffix
-    base = LLM_API_BASE.rstrip('/').replace('/v1', '')
-    
-    # Ollama uses /api/chat endpoint
-    url = f"{base}/api/chat"
-    
-    print(f"[DEBUG] Calling LLM at {url}", file=sys.stderr)
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (0.0 - 1.0)
+
+    Returns:
+        Generated text response
+    """
+    url = f"{LLM_API_BASE}/chat/completions"
+
+    print(f"[DEBUG] Calling OpenAI at {url}", file=sys.stderr)
     print(f"[DEBUG] Model: {LLM_MODEL_NAME}", file=sys.stderr)
     print(f"[DEBUG] Messages count: {len(messages)}", file=sys.stderr)
-    
-    headers: Dict[str, str] = {"Content-Type": "application/json"}
-    
-    # Ollama doesn't need API key for local use
-    if LLM_API_KEY:
-        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
 
-    # Ollama's chat API format
+    if not LLM_API_KEY:
+        raise LLMError("OPENAI_API_KEY environment variable is not set")
+
+    headers: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LLM_API_KEY}"
+    }
+
+    # OpenAI's chat API format
     payload: Dict[str, Any] = {
         "model": LLM_MODEL_NAME,
         "messages": messages,
-        "stream": False,  # Get complete response
-        "options": {
-            "temperature": temperature,
-            "num_predict": max_tokens,  # Ollama uses num_predict instead of max_tokens
-        }
+        "max_tokens": max_tokens,
+        "temperature": temperature,
     }
 
     try:
@@ -91,12 +91,17 @@ def chat_completion(
             f"Could not parse LLM response as JSON: {resp.text[:200]}"
         ) from e
 
-    # Ollama response format: {"message": {"role": "assistant", "content": "..."}}
-    message = data.get("message")
+    # OpenAI response format: {"choices": [{"message": {"role": "assistant", "content": "..."}}]}
+    choices = data.get("choices")
+    if not choices or len(choices) == 0:
+        print(f"[ERROR] Missing 'choices' in response: {data}", file=sys.stderr)
+        raise LLMError(f"LLM response missing 'choices': {data}")
+
+    message = choices[0].get("message")
     if not message:
-        print(f"[ERROR] Missing 'message' in response: {data}", file=sys.stderr)
-        raise LLMError(f"LLM response missing 'message': {data}")
-    
+        print(f"[ERROR] Missing 'message' in first choice: {choices[0]}", file=sys.stderr)
+        raise LLMError(f"LLM response missing 'message' in choices[0]: {data}")
+
     content = message.get("content")
     if not isinstance(content, str):
         print(f"[ERROR] Invalid content type: {type(content)}, value: {content}", file=sys.stderr)
