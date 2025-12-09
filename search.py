@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from external_apis import fetch_active_listings
-from sample_listings import SAMPLE_LISTINGS
+
 
 
 @dataclass
@@ -197,10 +197,9 @@ def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
         print(f"[DEBUG] Sample candidate: {candidates[0].get('make')} {candidates[0].get('model')}")
     
     # Blend in sample listings to avoid empty results and add variety
-    if candidates:
-        merged_candidates = candidates + SAMPLE_LISTINGS
-    else:
-        merged_candidates = SAMPLE_LISTINGS
+    
+    merged_candidates = candidates 
+  
 
     # Deduplicate by ID/VIN
     seen = set()
