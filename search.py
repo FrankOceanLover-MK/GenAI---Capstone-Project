@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from external_apis import fetch_active_listings
+from sample_listings import SAMPLE_LISTINGS
 
 
 @dataclass
@@ -187,16 +188,32 @@ def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
         min_year=2015,
         make=None,  # Don't filter by make
         body_style=criteria.body_style,
-        limit=30,  # Get more candidates
+        limit=100,  # Get more candidates for variety
     )
-    
+
     print(f"[DEBUG] Fetched {len(candidates)} candidates from API")
     
     if candidates:
         print(f"[DEBUG] Sample candidate: {candidates[0].get('make')} {candidates[0].get('model')}")
     
+    # Blend in sample listings to avoid empty results and add variety
+    if candidates:
+        merged_candidates = candidates + SAMPLE_LISTINGS
+    else:
+        merged_candidates = SAMPLE_LISTINGS
+
+    # Deduplicate by ID/VIN
+    seen = set()
+    unique_candidates = []
+    for item in merged_candidates:
+        key = str(item.get("id") or item.get("vin") or id(item))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(item)
+
     # Apply filters
-    filtered = [c for c in candidates if _passes_filters(c, criteria)]
+    filtered = [c for c in unique_candidates if _passes_filters(c, criteria)]
     print(f"[DEBUG] {len(filtered)} candidates passed filters")
     
     # Score all filtered candidates

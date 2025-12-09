@@ -242,7 +242,13 @@ if user_input:
     with st.chat_message("assistant"):
         with st.spinner("🔍 Searching live listings and analyzing..."):
             try:
-                reply = ask_chat(user_input, vin=None)
+                history_for_backend = [
+                    {"role": msg.get("role"), "content": msg.get("content")}
+                    for msg in st.session_state.chat_messages
+                    if msg.get("role") in {"user", "assistant"} and msg.get("content")
+                ][-10:]
+
+                reply = ask_chat(user_input, vin=None, history=history_for_backend)
                 
                 answer = reply.get("answer", "I couldn't find a suitable response.")
                 # Escape markdown to prevent italic text rendering
