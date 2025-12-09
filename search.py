@@ -44,6 +44,7 @@ class SearchCriteria:
     max_distance: Optional[float] = None
     body_style: Optional[str] = None
     fuel_type: Optional[str] = None
+    make: Optional[str] = None
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -138,6 +139,12 @@ def score_listing(listing: Dict[str, Any], criteria: SearchCriteria) -> ListingW
 
 
 def _passes_filters(listing: Dict[str, Any], criteria: SearchCriteria) -> bool:
+    # Make filter
+    if criteria.make:
+        make = (listing.get("make") or "").lower()
+        if criteria.make not in make:
+            return False
+        
     # Budget filter - more flexible
     if criteria.budget is not None:
         price = listing.get("price")
@@ -184,12 +191,13 @@ def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
     """
     # First, let's see what the API returns
     candidates = fetch_active_listings(
-        budget=criteria.budget,
-        min_year=2015,
-        make=None,  # Don't filter by make
-        body_style=criteria.body_style,
-        limit=100,  # Get more candidates for variety
-    )
+    budget=criteria.budget,
+    min_year=2015,
+    make=criteria.make,  # now we pass it through
+    body_style=criteria.body_style,
+    limit=100,
+)
+
 
     print(f"[DEBUG] Fetched {len(candidates)} candidates from API")
     
@@ -197,10 +205,8 @@ def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
         print(f"[DEBUG] Sample candidate: {candidates[0].get('make')} {candidates[0].get('model')}")
     
     # Blend in sample listings to avoid empty results and add variety
-    if candidates:
-        merged_candidates = candidates + SAMPLE_LISTINGS
-    else:
-        merged_candidates = SAMPLE_LISTINGS
+    merged_candidates = candidates + SAMPLE_LISTINGS
+   
 
     # Deduplicate by ID/VIN
     seen = set()

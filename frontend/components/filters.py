@@ -17,6 +17,7 @@ def render():
             step=5,
             help="Distance from your location if the backend provides it.",
         )
+        make = st.text_input("Preferred make (optional)", value="")
         body_style = st.selectbox(
             "Body style",
             ["Any", "SUV", "Sedan", "Truck", "Coupe", "Hatchback", "Minivan"],
@@ -34,6 +35,8 @@ def render():
         "max_distance": float(max_distance) if max_distance else None,
         "top_k": int(top_k),
     }
+    if make.strip():
+        params["make"] = make.strip().lower()
     if body_style != "Any":
         params["body_style"] = body_style.lower()
     if fuel_type != "Any":
@@ -41,3 +44,4 @@ def render():
 
     run = st.button("Find recommendations", type="primary")
     return run, params
+
