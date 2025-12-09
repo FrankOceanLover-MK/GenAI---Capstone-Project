@@ -267,6 +267,14 @@ def extract_filters_from_question(question: str) -> Dict[str, Any]:
     if isinstance(fuel_type, str) and fuel_type.strip():
         filters["fuel_type"] = fuel_type.strip()
 
+    make = data.get("make")
+    if isinstance(make, str) and make.strip():
+        filters["make"] = make.strip()
+
+    model = data.get("model")
+    if isinstance(model, str) and model.strip():
+        filters["model"] = model.strip()
+
     return filters
 
 
@@ -279,6 +287,9 @@ def build_criteria_from_filters(filters: Dict[str, Any]) -> SearchCriteria:
         max_distance=_parse_number_maybe(filters.get("max_distance")),
         body_style=(filters.get("body_style") or None),
         fuel_type=(filters.get("fuel_type") or None),
+
+        make=(filters.get("make") or None),
+        model=(filters.get("model") or None),
     )
 
 

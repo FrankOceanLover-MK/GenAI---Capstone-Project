@@ -44,6 +44,8 @@ class SearchCriteria:
     max_distance: Optional[float] = None
     body_style: Optional[str] = None
     fuel_type: Optional[str] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -186,7 +188,7 @@ def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
     candidates = fetch_active_listings(
         budget=criteria.budget,
         min_year=2015,
-        make=None,  # Don't filter by make
+        make=criteria.make,  # Don't filter by make
         body_style=criteria.body_style,
         limit=100,  # Get more candidates for variety
     )
@@ -197,10 +199,12 @@ def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
         print(f"[DEBUG] Sample candidate: {candidates[0].get('make')} {candidates[0].get('model')}")
     
     # Blend in sample listings to avoid empty results and add variety
-    if candidates:
-        merged_candidates = candidates + SAMPLE_LISTINGS
-    else:
-        merged_candidates = SAMPLE_LISTINGS
+    # if candidates:
+    #     merged_candidates = candidates + SAMPLE_LISTINGS
+    # else:
+    #     merged_candidates = SAMPLE_LISTINGS
+    # 3. USE ONLY REAL CANDIDATES
+    merged_candidates = candidates
 
     # Deduplicate by ID/VIN
     seen = set()

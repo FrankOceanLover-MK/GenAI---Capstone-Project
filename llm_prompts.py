@@ -61,34 +61,25 @@ def build_car_advice_messages(user_question: str, car_summary: str) -> List[Dict
 
 def build_filter_extraction_messages(user_query: str) -> List[Dict[str, str]]:
     """
-    Enhanced filter extraction with better interpretation of natural language.
+    Enhanced filter extraction including Make and Model.
     """
     return [
         {
             "role": "system",
             "content": (
-                "You are a search filter extraction assistant. Your job is to convert natural "
-                "language car shopping requests into structured search parameters.\n\n"
+                "You are a search filter extraction assistant. Output ONLY a JSON object.\n"
                 "Extract these fields:\n"
+                "- make: Car manufacturer (e.g. Toyota, Honda) or null\n"
+                "- model: Car model (e.g. Camry, Civic) or null\n"
                 "- budget: max price in dollars (number or null)\n"
                 "- max_distance: max distance in miles (number or null)\n"
-                "- body_style: SUV, Sedan, Truck, Coupe, Hatchback, Wagon, Minivan (string or null)\n"
-                "- fuel_type: Gasoline, Diesel, Hybrid, Electric, Plug-in Hybrid (string or null)\n\n"
-                "Interpretation guidelines:\n"
-                "- Budget: '30k' = 30000, 'around 25000' = 25000, 'under 20k' = 20000\n"
-                "- If user says 'affordable' or 'budget-friendly' without a number, use null\n"
-                "- Distance: 'nearby' = 50, 'local' = 30, 'within X miles' = X\n"
-                "- Body style: Map 'family car' to SUV, 'commuter' to Sedan, 'work vehicle' to Truck\n"
-                "- Fuel: 'good MPG' = null (let economy scoring handle it), 'electric' = Electric\n\n"
-                "Output ONLY a JSON object. No explanations, no markdown, no extra text."
+                "- body_style: SUV, Sedan, Truck, etc. (string or null)\n"
+                "- fuel_type: Gasoline, Hybrid, Electric (string or null)\n"
             ),
         },
         {
             "role": "user",
-            "content": (
-                f"Extract search filters from this request:\n\n{user_query}\n\n"
-                "Return only the JSON object."
-            ),
+            "content": f"Extract filters from: {user_query}",
         },
     ]
 
