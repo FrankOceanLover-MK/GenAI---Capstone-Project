@@ -257,6 +257,15 @@ def extract_filters_from_question(question: str) -> Dict[str, Any]:
     if isinstance(fuel_type, str) and fuel_type.strip():
         filters["fuel_type"] = fuel_type.strip()
 
+    # NEW
+    make = data.get("make")
+    if isinstance(make, str) and make.strip():
+        filters["make"] = make.strip()
+
+    model = data.get("model")
+    if isinstance(model, str) and model.strip():
+        filters["model"] = model.strip()
+
     return filters
 
 
@@ -269,6 +278,10 @@ def build_criteria_from_filters(filters: Dict[str, Any]) -> SearchCriteria:
         max_distance=_parse_number_maybe(filters.get("max_distance")),
         body_style=(filters.get("body_style") or None),
         fuel_type=(filters.get("fuel_type") or None),
+
+        # NEW
+        make=(filters.get("make") or None),
+        model=(filters.get("model") or None),
     )
 
 
@@ -276,17 +289,19 @@ def build_criteria_from_filters(filters: Dict[str, Any]) -> SearchCriteria:
 # Chat endpoint
 # -------------------------------------------------------------------
 
+# -------------------------------------------------------------------
+# Chat endpoint (UPDATED)
+# -------------------------------------------------------------------
+
+def _parse_number(val):
+    if not val: return None
+    try: return float(str(val).replace(',','').replace('$',''))
+    except: return None
+
 @app.post("/chat", response_model=ChatResponse)
 def chat_with_llm(payload: ChatRequest) -> ChatResponse:
     """
     LLM powered explanation endpoint.
-
-    VIN mode
-      Use the VIN to decode a profile and explain that specific car.
-
-    General mode
-      Use the question to infer filters, search live listings, and then explain
-      the best matches.
     """
     question = payload.question.strip()
     if not question:
@@ -294,11 +309,11 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
 
     vin = (payload.vin or "").strip()
 
-    # VIN specific mode
+    # 1. VIN Mode
     if vin:
         try:
             profile_dict = get_car_profile_from_vin(vin)
-        except ExternalApiError as e:  # type: ignore[misc]
+        except ExternalApiError as e:
             raise HTTPException(status_code=502, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -326,11 +341,34 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
             listings=[],
         )
 
-    # General discovery mode
-    filters = extract_filters_from_question(question)
-    criteria = build_criteria_from_filters(filters)
+    # 2. General Search Mode
+    # Step A: Extract Filters
+    filter_msgs = build_filter_extraction_messages(question)
+    try:
+        json_text = chat_completion(filter_msgs)
+        # Parse loose JSON
+        start = json_text.find('{')
+        end = json_text.rfind('}') + 1
+        
+        # DEBUG: See what the AI thinks
+        print(f"\n[DEBUG] AI JSON Response: {json_text}")
 
-    # Run search
+        filters = json.loads(json_text[start:end]) if start != -1 else {}
+    except Exception as e:
+        print(f"[DEBUG] JSON Parsing Failed: {e}")
+        filters = {}
+
+    # Step B: Build Criteria (Including Make/Model)
+    criteria = SearchCriteria(
+        budget=_parse_number(filters.get("budget")),
+        max_distance=_parse_number(filters.get("max_distance")),
+        body_style=filters.get("body_style"),
+        fuel_type=filters.get("fuel_type"),
+        make=filters.get("make"),   # <--- Wires up Make
+        model=filters.get("model")  # <--- Wires up Model
+    )
+
+    # Step C: Search
     try:
         results = search_pipeline(criteria, top_k=5)
     except Exception as e:
@@ -339,19 +377,19 @@ def chat_with_llm(payload: ChatRequest) -> ChatResponse:
     listing_models: List[SearchListing] = []
     listing_dicts: List[Dict[str, Any]] = []
     for r in results:
-        # r.listing is already a dict from the search pipeline
         model = SearchListing(**r.listing)
         listing_models.append(model)
         listing_dicts.append(model.dict())
 
-    messages = build_recommendation_messages(
+    # Step D: Generate Answer
+    reco_msgs = build_recommendation_messages(
         user_query=question,
         filters=filters,
         listings=listing_dicts,
     )
 
     try:
-        answer = chat_completion(messages)
+        answer = chat_completion(reco_msgs)
     except LLMError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:

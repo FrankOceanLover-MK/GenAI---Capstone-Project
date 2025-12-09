@@ -43,6 +43,8 @@ class SearchCriteria:
     max_distance: Optional[float] = None
     body_style: Optional[str] = None
     fuel_type: Optional[str] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -168,6 +170,8 @@ def search(criteria: SearchCriteria, top_k: int = 5) -> List[ListingWithScore]:
         budget=criteria.budget,
         min_year=2015,
         body_style=criteria.body_style,
+        make=criteria.make,  
+        model=criteria.model,
         limit=20,
     )
 

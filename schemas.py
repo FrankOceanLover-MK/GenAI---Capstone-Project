@@ -74,6 +74,16 @@ class SearchCriteriaModel(BaseModel):
         None,
         description="Desired fuel type such as gasoline, hybrid, electric.",
     )
+    # === NEW FIELDS FOR MAKE/MODEL FILTERING ===
+    make: Optional[str] = Field(
+        None,
+        description="Car make (e.g. Toyota, Ford)",
+    )
+    model: Optional[str] = Field(
+        None,
+        description="Car model (e.g. Camry, F-150)",
+    )
+    # ===========================================
     top_k: Optional[int] = Field(
         5,
         description="Maximum number of results to return.",

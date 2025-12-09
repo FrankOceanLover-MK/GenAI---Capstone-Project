@@ -49,42 +49,19 @@ def build_car_advice_messages(user_question: str, car_summary: str) -> List[Dict
 
 
 def build_filter_extraction_messages(user_query: str) -> List[Dict[str, str]]:
-    """
-    Messages for turning a free form request into structured filters.
-
-    The model must return a single JSON object with four keys:
-
-      budget        maximum budget in dollars
-      max_distance  maximum acceptable distance in miles
-      body_style    desired body style string
-      fuel_type     desired fuel type string
-
-    Values that are unknown must be null. No extra text is allowed.
-    """
     return [
         {
             "role": "system",
             "content": (
-                "You extract search filters for used car listings from free text.\n\n"
-                "Return a single JSON object with these keys:\n"
-                "  budget: number or null\n"
-                "  max_distance: number or null\n"
-                "  body_style: string or null\n"
-                "  fuel_type: string or null\n\n"
-                "Interpret amounts like '30k' or '~25 000' as dollar amounts. "
-                "If the user sounds price flexible and does not give a clear maximum, "
-                "set budget to null.\n\n"
-                "If the user does not care about a field, set it to null.\n\n"
-                "Output only JSON. No explanations, no markdown, no extra text."
+                "You are a precise JSON extraction tool. output ONLY valid JSON.\n"
+                "Extract these fields: budget (number), make (string), model (string), body_style (string), fuel_type (string).\n"
+                "Example: 'Toyota Camry under 20k' -> {\"make\": \"Toyota\", \"model\": \"Camry\", \"budget\": 20000}\n"
+                "Do NOT write 'Here is the JSON'. Just write the JSON."
             ),
         },
         {
             "role": "user",
-            "content": (
-                "User request:\n\n"
-                f"{user_query}\n\n"
-                "Return only the JSON object with the extracted filters."
-            ),
+            "content": f"Extract filters from: {user_query}",
         },
     ]
 
